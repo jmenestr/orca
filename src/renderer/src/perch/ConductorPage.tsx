@@ -9,17 +9,23 @@ import type { ConductorMessage } from '@/perch/perch-client'
 // Why: the Conductor view — a plain-language chat with the firstmate conductor
 // that directs real Orca crewmates. Built on Orca's shadcn primitives and the
 // STYLEGUIDE tokens (worktree-sidebar / muted / border roles, 13px body text).
+function ConductorNoticeRow({ message }: { message: ConductorMessage }): React.JSX.Element {
+  return (
+    <div className="flex w-full items-center justify-center py-0.5">
+      <span className="text-[11px] italic text-muted-foreground/70">{message.text}</span>
+    </div>
+  )
+}
+
 function ConductorMessageRow({ message }: { message: ConductorMessage }): React.JSX.Element {
   const isUser = message.role === 'user'
-  const isNotice = message.role === 'notice'
   return (
     <div className={cn('flex w-full', isUser ? 'justify-end' : 'justify-start')}>
       <div
         className={cn(
           'max-w-[680px] rounded-lg px-3 py-2 text-[13px] leading-relaxed whitespace-pre-wrap break-words',
           isUser && 'bg-primary text-primary-foreground',
-          !isUser && !isNotice && 'bg-muted text-foreground',
-          isNotice && 'border border-border/60 bg-background/40 text-muted-foreground italic'
+          !isUser && 'bg-muted text-foreground'
         )}
       >
         {message.text}
@@ -104,7 +110,13 @@ export default function ConductorPage(): React.JSX.Element {
               </p>
             </div>
           ) : (
-            transcript.map((message) => <ConductorMessageRow key={message.id} message={message} />)
+            transcript.map((message) =>
+              message.role === 'notice' ? (
+                <ConductorNoticeRow key={message.id} message={message} />
+              ) : (
+                <ConductorMessageRow key={message.id} message={message} />
+              )
+            )
           )}
         </div>
       </ScrollArea>

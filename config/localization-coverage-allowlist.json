@@ -1,1 +1,58 @@
-[]
+[
+  {
+    "filePath": "src/renderer/src/perch/ConductorPage.tsx",
+    "kind": "jsx-attribute:aria-label",
+    "text": "Back",
+    "dynamic": false,
+    "count": 1
+  },
+  {
+    "filePath": "src/renderer/src/perch/ConductorPage.tsx",
+    "kind": "jsx-text",
+    "text": "Conductor",
+    "dynamic": false,
+    "count": 1
+  },
+  {
+    "filePath": "src/renderer/src/perch/ConductorPage.tsx",
+    "kind": "jsx-text",
+    "text": "Direct your fleet in plain language",
+    "dynamic": false,
+    "count": 1
+  },
+  {
+    "filePath": "src/renderer/src/perch/ConductorPage.tsx",
+    "kind": "jsx-text",
+    "text": "Tell the conductor a goal",
+    "dynamic": false,
+    "count": 1
+  },
+  {
+    "filePath": "src/renderer/src/perch/ConductorPage.tsx",
+    "kind": "jsx-text",
+    "text": "Describe what you want done and the conductor will dispatch a crewmate to work on it inside Orca - watch it run in the app.",
+    "dynamic": false,
+    "count": 1
+  },
+  {
+    "filePath": "src/renderer/src/perch/ConductorPage.tsx",
+    "kind": "jsx-attribute:placeholder",
+    "text": "Ship the dark mode toggle in widget…",
+    "dynamic": false,
+    "count": 1
+  },
+  {
+    "filePath": "src/renderer/src/perch/ConductorPage.tsx",
+    "kind": "jsx-text",
+    "text": "Send",
+    "dynamic": false,
+    "count": 1
+  },
+  {
+    "filePath": "src/renderer/src/perch/PerchSidebarNav.tsx",
+    "kind": "jsx-text",
+    "text": "Conductor",
+    "dynamic": false,
+    "count": 1
+  }
+]
