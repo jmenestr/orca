@@ -40,6 +40,8 @@ import { homedir } from 'os'
 import { isAbsolute, join, resolve } from 'path'
 import { mkdir, readFile, readdir, rm, stat } from 'fs/promises'
 import { OrchestrationDb } from './orchestration/db'
+import { PerchDb } from '../perch/perch-db'
+import { PerchService, type PerchConductorFrame } from '../perch/perch-service'
 import { formatMessagesForInjection } from './orchestration/formatter'
 import type {
   Automation,
@@ -1145,6 +1147,9 @@ type RuntimeNotifier = {
   // input. See docs/mobile-presence-lock.md.
   terminalDriverChanged(ptyId: string, driver: DriverState): void
   browserDriverChanged?(browserPageId: string, driver: RuntimeBrowserDriverState): void
+  // Why: pushes a Perch conductor stream-json frame to the renderer over the
+  // 'perch:changed' channel; the desktop Conductor view consumes it live.
+  perchChanged?(frame: PerchConductorFrame): void
 }
 
 type TerminalHandleRecord = {
@@ -1826,6 +1831,7 @@ export class OrcaRuntimeService {
   private cloneInFlightByPath = new Map<string, Promise<void>>()
   private agentDetector: AgentDetector | null = null
   private _orchestrationDb: OrchestrationDb | null = null
+  private _perchService: PerchService | null = null
   private messageWaitersByHandle = new Map<string, Set<MessageWaiter>>()
   // Why: mobile clients subscribe to terminal output via terminal.subscribe.
   // These listeners fire on every onPtyData call, enabling real-time streaming
@@ -2455,6 +2461,31 @@ export class OrcaRuntimeService {
 
   setOrchestrationDb(db: OrchestrationDb): void {
     this._orchestrationDb = db
+  }
+
+  // Why: lazily own the single Perch conductor service (its own perch.db, kept
+  // entirely separate from orchestration.db). Mirrors getOrchestrationDb. On
+  // first construction we fan every conductor frame out to the renderer push
+  // bus (notifier.perchChanged) and register a quit hook so the long-lived
+  // conductor subprocess is killed when the app exits.
+  getPerchService(): PerchService {
+    if (!this._perchService) {
+      const { app } = require('electron')
+      const db = new PerchDb(join(app.getPath('userData'), 'perch.db'))
+      const service = new PerchService({ db })
+      service.subscribe((frame) => this.notifier?.perchChanged?.(frame))
+      app.on('before-quit', () => service.kill())
+      this._perchService = service
+    }
+    return this._perchService
+  }
+
+  // Why: lets tests inject a PerchService backed by a fake conductor + in-memory
+  // PerchDb without touching the filesystem or spawning claude. Mirrors
+  // setOrchestrationDb.
+  setPerchService(service: PerchService): void {
+    this._perchService = service
+    service.subscribe((frame) => this.notifier?.perchChanged?.(frame))
   }
 
   setAutomationService(service: AutomationService): void {

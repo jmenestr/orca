@@ -9,6 +9,7 @@ import { useMobileSidebarOnboardingBadge } from './mobile-sidebar-onboarding-bad
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { SetupGuideSidebarEntry } from './SetupGuideSidebarEntry'
 import { SidebarTaskNavButton } from './SidebarTaskNavButton'
+import PerchSidebarNav from '@/perch/PerchSidebarNav'
 import { HideSidebarMenu } from './sidebar-nav-controls'
 import { translate } from '@/i18n/i18n'
 
@@ -63,6 +64,7 @@ const SidebarNav = React.memo(function SidebarNav() {
     >
       <SetupGuideSidebarEntry />
       <SidebarTaskNavButton />
+      <PerchSidebarNav />
       {showAutomationsButton ? (
         <ContextMenu>
           <ContextMenuTrigger asChild>

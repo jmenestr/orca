@@ -277,6 +277,7 @@ const Settings = lazy(() => import('./components/settings/Settings'))
 const SkillsPage = lazy(() => import('./components/skills/SkillsPage'))
 const WorkspaceSpacePage = lazy(() => import('./components/workspace-space/WorkspaceSpacePage'))
 const MobilePage = lazy(() => import('./components/mobile/MobilePage'))
+const ConductorPage = lazy(() => import('./perch/ConductorPage'))
 const QuickOpen = lazy(() => import('./components/QuickOpen'))
 const WorktreeJumpPalette = lazy(() => import('./components/WorktreeJumpPalette'))
 const WorkspaceCleanupDialog = lazy(
@@ -2255,6 +2256,7 @@ function App(): React.JSX.Element {
                               {activeView === 'activity' ? <ActivityPrototypePage /> : null}
                               {activeView === 'space' ? <WorkspaceSpacePage /> : null}
                               {activeView === 'mobile' ? <MobilePage /> : null}
+                              {activeView === 'conductor' ? <ConductorPage /> : null}
                               {activeView === 'terminal' &&
                               creationLayoutActive &&
                               activePendingCreationId ? (

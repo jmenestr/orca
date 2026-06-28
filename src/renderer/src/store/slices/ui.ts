@@ -553,6 +553,7 @@ export type UISlice = {
     | 'space'
     | 'skills'
     | 'mobile'
+    | 'conductor'
   previousViewBeforeTasks:
     | 'terminal'
     | 'settings'
@@ -561,6 +562,7 @@ export type UISlice = {
     | 'space'
     | 'skills'
     | 'mobile'
+    | 'conductor'
   previousViewBeforeSettings:
     | 'terminal'
     | 'tasks'
@@ -569,6 +571,7 @@ export type UISlice = {
     | 'space'
     | 'skills'
     | 'mobile'
+    | 'conductor'
   previousViewBeforeActivity:
     | 'terminal'
     | 'settings'
@@ -577,6 +580,7 @@ export type UISlice = {
     | 'space'
     | 'skills'
     | 'mobile'
+    | 'conductor'
   previousViewBeforeAutomations:
     | 'terminal'
     | 'settings'
@@ -585,6 +589,7 @@ export type UISlice = {
     | 'space'
     | 'skills'
     | 'mobile'
+    | 'conductor'
   previousViewBeforeSpace:
     | 'terminal'
     | 'settings'
@@ -593,6 +598,7 @@ export type UISlice = {
     | 'automations'
     | 'skills'
     | 'mobile'
+    | 'conductor'
   previousViewBeforeSkills:
     | 'terminal'
     | 'settings'
@@ -601,6 +607,7 @@ export type UISlice = {
     | 'automations'
     | 'space'
     | 'mobile'
+    | 'conductor'
   previousViewBeforeMobile:
     | 'terminal'
     | 'settings'
@@ -609,6 +616,18 @@ export type UISlice = {
     | 'automations'
     | 'space'
     | 'skills'
+    | 'conductor'
+  // Why: the view to restore when the Conductor page closes; mirrors the other
+  // previousViewBefore* fields (all views except 'conductor' itself).
+  previousViewBeforeConductor:
+    | 'terminal'
+    | 'settings'
+    | 'tasks'
+    | 'activity'
+    | 'automations'
+    | 'space'
+    | 'skills'
+    | 'mobile'
   setActiveView: (view: UISlice['activeView']) => void
   taskPageData: {
     preselectedRepoId?: string
@@ -1136,6 +1155,7 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set, get)
   previousViewBeforeSpace: 'terminal',
   previousViewBeforeSkills: 'terminal',
   previousViewBeforeMobile: 'terminal',
+  previousViewBeforeConductor: 'terminal',
   setActiveView: (view) => set({ activeView: view }),
   taskPageData: {},
   taskResumeState: undefined,

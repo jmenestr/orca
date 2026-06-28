@@ -2565,6 +2565,10 @@ export type PreloadApi = {
       callback: (event: { browserPageId: string; driver: RuntimeBrowserDriverState }) => void
     ) => () => void
   }
+  perch: {
+    call: (args: { method: string; params?: unknown }) => Promise<RuntimeRpcResponse<unknown>>
+    onChanged: (callback: (frame: unknown) => void) => () => void
+  }
   runtimeEnvironments: {
     list: () => Promise<PublicKnownRuntimeEnvironment[]>
     addFromPairingCode: (args: {
