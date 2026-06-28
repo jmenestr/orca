@@ -13,7 +13,7 @@ const DEFAULT_ARGS = [
   'stream-json',
   '--verbose',
   '--include-partial-messages',
-  '--dangerously-skip-permissions',
+  '--dangerously-skip-permissions'
 ]
 
 type ClaudeAdapterOptions = {
@@ -78,7 +78,7 @@ function parseLine(line: string): ConductFrame[] {
 function buildUserMessage(prompt: string): string {
   return JSON.stringify({
     type: 'user',
-    message: { role: 'user', content: [{ type: 'text', text: prompt }] },
+    message: { role: 'user', content: [{ type: 'text', text: prompt }] }
   })
 }
 
@@ -100,7 +100,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     const child = spawn(this.command, args, {
       cwd: options?.cwd,
       env: { ...process.env, ...options?.env },
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe']
     })
     this.child = child
 
@@ -148,7 +148,11 @@ export class ClaudeAdapter implements HarnessAdapter {
     const line = buildUserMessage(text)
     await new Promise<void>((resolve, reject) => {
       this.child!.stdin!.write(`${line}\n`, (err) => {
-        err ? reject(err) : resolve()
+        if (err) {
+          reject(err)
+        } else {
+          resolve()
+        }
       })
     })
   }

@@ -14,6 +14,9 @@ import {
 export type PerchSlice = {
   conductorTranscript: ConductorMessage[]
   conductorStreaming: boolean
+  // Why: tracks that a result frame was received, forcing the next text frame
+  // to open a fresh bubble rather than appending to the previous turn.
+  conductorTurnEnded: boolean
   openConductorPage: () => void
   closeConductorPage: () => void
   hydrateConductorTranscript: () => Promise<void>
@@ -33,6 +36,7 @@ function nextId(role: string): string {
 export const createPerchSlice: StateCreator<AppState, [], [], PerchSlice> = (set, get) => ({
   conductorTranscript: [],
   conductorStreaming: false,
+  conductorTurnEnded: false,
 
   openConductorPage: () => {
     set((state) => ({
@@ -98,9 +102,12 @@ export const createPerchSlice: StateCreator<AppState, [], [], PerchSlice> = (set
       const transcript = state.conductorTranscript
       switch (frame.kind) {
         case 'text': {
-          // Append to the streaming assistant message, or start one.
+          // Start a new bubble when the previous turn ended, or when there is no
+          // current streaming assistant message to append to.
           const last = transcript.at(-1)
-          if (last && last.role === 'assistant' && last.streaming) {
+          const canAppend =
+            !state.conductorTurnEnded && last?.role === 'assistant' && last.streaming === true
+          if (canAppend) {
             const updated = { ...last, text: last.text + frame.text }
             return { conductorTranscript: [...transcript.slice(0, -1), updated] }
           }
@@ -109,17 +116,17 @@ export const createPerchSlice: StateCreator<AppState, [], [], PerchSlice> = (set
               ...transcript,
               { id: nextId('assistant'), role: 'assistant', text: frame.text, streaming: true }
             ],
-            conductorStreaming: true
+            conductorStreaming: true,
+            conductorTurnEnded: false
           }
         }
         case 'result': {
-          // Finalize the streaming assistant message.
-          const last = transcript.at(-1)
-          let next = transcript
-          if (last && last.role === 'assistant' && last.streaming) {
-            next = [...transcript.slice(0, -1), { ...last, streaming: false }]
-          }
-          return { conductorTranscript: next, conductorStreaming: false }
+          // Finalize any streaming assistant message in the transcript and mark
+          // the turn boundary so the next text frame opens a fresh bubble.
+          const next = transcript.map((m) =>
+            m.role === 'assistant' && m.streaming ? { ...m, streaming: false } : m
+          )
+          return { conductorTranscript: next, conductorStreaming: false, conductorTurnEnded: true }
         }
         case 'notice':
         case 'error': {
