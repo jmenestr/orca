@@ -44,3 +44,21 @@ Be mindful of the user's `gh` CLI API rate limit — batch requests where possib
 Never commit PR evidence images; attach them to the PR conversation instead (but never use gh-attach).
 
 ## Type Declarations: Prefer `.ts` Over `.d.ts`
+
+## firstmate Package (`@orca/firstmate`)
+
+`firstmate/` is a pnpm workspace package (`@orca/firstmate`) declared in `pnpm-workspace.yaml`.
+It provides the `fm` binary (entry: `firstmate/bin/fm.js`) and the `conduct` subcommand.
+
+The conduct layer lives in `firstmate/src/conduct/`:
+- `frames.ts` - shared `ConductFrame` union type (`TextFrame | ToolFrame | DoneFrame | SessionFrame | ErrorFrame`)
+- `adapter.ts` - the `HarnessAdapter` type (use `type`, not `interface`, per oxlint)
+- `adapters/claude.ts` - the reference Claude adapter; spawns `claude` with stream-json flags and parses `stream_event` / `system` / `result` lines into frames
+- `adapters/{cursor,codex,opencode,pi}.ts` - stubs (throw `'not implemented'`)
+- `index.ts` - arg parsing and dispatch for `fm conduct`
+
+The adapter tests use a fake claude fixture at `firstmate/src/conduct/fixtures/fake-claude.mjs`.
+Override the command in tests via `new ClaudeAdapter({ command: 'node', args: [FAKE_CLAUDE] })`.
+
+The package has its own `tsconfig.json` (NodeNext ESM), `vitest.config.ts`, and `package.json`.
+Run `pnpm --filter @orca/firstmate typecheck` / `test` for isolated checks.
