@@ -93,6 +93,10 @@ recorded_windows() {
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     w=$(grep '^window=' "$meta" | cut -d= -f2- || true)
+    # engine=orca tasks run inside the Orca app and record an empty window=, so
+    # they have no tmux pane to hash; skipping them here means pane-staleness is
+    # never evaluated for them. Their generated check.sh mirrors the Orca agent
+    # status into state/<id>.status instead, which drives wakes via the signal scan.
     [ -n "$w" ] || continue
     case "$seen" in
       *"|$w|"*) continue ;;

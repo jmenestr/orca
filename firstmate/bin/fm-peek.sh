@@ -10,7 +10,31 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
+# shellcheck source=bin/fm-orca-lib.sh
+. "$SCRIPT_DIR/fm-orca-lib.sh"
+
 "$SCRIPT_DIR/fm-guard.sh" || true
+
+# engine=orca tasks have no tmux pane: read the agent terminal's tail through the
+# Orca CLI instead. A bare fm-<id> whose meta records engine=orca is handled here.
+case "${1:-}" in
+  fm-*)
+    _orca_meta="$STATE/${1#fm-}.meta"
+    if [ -f "$_orca_meta" ] && grep -qx 'engine=orca' "$_orca_meta"; then
+      _orca_id=${1#fm-}
+      N=${2:-40}
+      H=$(orca_terminal_handle "$_orca_id") || {
+        echo "error: no live Orca terminal for $_orca_id (worktree gone?)" >&2
+        exit 1
+      }
+      orca_cli terminal read --terminal "$H" --limit "$N" || {
+        echo "error: 'orca terminal read' failed (is the Orca app running?)" >&2
+        exit 1
+      }
+      exit 0
+    fi
+    ;;
+esac
 
 resolve() {
   case "$1" in

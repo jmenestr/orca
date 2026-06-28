@@ -21,8 +21,59 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-orca-lib.sh
+. "$SCRIPT_DIR/fm-orca-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
+
+# engine=orca tasks run inside the Orca app, not a tmux pane: route steering
+# through `orca terminal send` against the worktree's agent terminal. A bare
+# fm-<id> whose meta records engine=orca is resolved here; everything else falls
+# through to the tmux path below.
+orca_send_confirm() {
+  local out accepted refused
+  out=$(orca_cli terminal send "$@" --json 2>/dev/null) || {
+    echo "error: 'orca terminal send' failed (is the Orca app running?)" >&2
+    return 1
+  }
+  accepted=$(printf '%s' "$out" | jq -r '.result.send.accepted // false' 2>/dev/null)
+  if [ "$accepted" != true ]; then
+    refused=$(printf '%s' "$out" | jq -r '.result.send.refusedReason // "unknown"' 2>/dev/null)
+    echo "error: 'orca terminal send' not accepted (reason: $refused)" >&2
+    return 1
+  fi
+  return 0
+}
+
+case "${1:-}" in
+  fm-*)
+    _orca_meta="$STATE/${1#fm-}.meta"
+    if [ -f "$_orca_meta" ] && grep -qx 'engine=orca' "$_orca_meta"; then
+      _orca_id=${1#fm-}
+      shift
+      H=$(orca_terminal_handle "$_orca_id") || {
+        echo "error: no live Orca terminal for $_orca_id (worktree gone?)" >&2
+        exit 1
+      }
+      if [ "${1:-}" = "--interrupt" ]; then
+        orca_send_confirm --terminal "$H" --interrupt || exit 1
+      elif [ "${1:-}" = "--key" ]; then
+        case "${2:-}" in
+          Escape|Esc) orca_send_confirm --terminal "$H" --text $'\x1b' || exit 1 ;;
+          Enter)      orca_send_confirm --terminal "$H" --enter || exit 1 ;;
+          C-c|c-c)    orca_send_confirm --terminal "$H" --interrupt || exit 1 ;;
+          *)
+            echo "error: unsupported --key '${2:-}' for engine=orca (use Escape, Enter, C-c, or --interrupt)" >&2
+            exit 1
+            ;;
+        esac
+      else
+        orca_send_confirm --terminal "$H" --text "$*" --enter || exit 1
+      fi
+      exit 0
+    fi
+    ;;
+esac
 
 resolve() {
   case "$1" in

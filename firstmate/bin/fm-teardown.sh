@@ -510,6 +510,74 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
   exit 0
 fi
 
+# Orca teardown: the worktree lives inside the Orca app, not a local treehouse
+# pool, so removal is `orca worktree rm` rather than `treehouse return`. There is
+# no local treehouse checkout, but worktree_path records the worktree's own path,
+# so run firstmate's verbatim unlanded-work safety check there before removing.
+if [ "$MODE" = orca ] && [ "$KIND" != secondmate ]; then
+  # shellcheck source=bin/fm-orca-lib.sh
+  . "$SCRIPT_DIR/fm-orca-lib.sh"
+  ORCA_WT_PATH=$(grep '^worktree_path=' "$META" | cut -d= -f2- || true)
+  # WT (the worktree= value) is the Orca selector id:<wid> for `orca worktree rm`.
+
+  if [ "$FORCE" != "--force" ]; then
+    if [ "$KIND" = scout ]; then
+      REPORT="$DATA/$ID/report.md"
+      if [ ! -f "$REPORT" ]; then
+        echo "REFUSED: scout task $ID has no report at $REPORT." >&2
+        echo "The report is the work product (or get the captain's explicit OK to discard, then --force)." >&2
+        exit 1
+      fi
+    else
+      if [ -z "$ORCA_WT_PATH" ]; then
+        echo "REFUSED: no worktree_path recorded for orca task $ID; cannot verify it holds no unlanded work." >&2
+        echo "Get the captain's explicit OK to discard, then --force." >&2
+        exit 1
+      fi
+      # Verbatim dirty/unpushed check. A non-zero git status (the path is absent
+      # because the Orca runtime is remote, or it is not a git repo) must REFUSE
+      # rather than be read as 'clean', which would let the destructive rm discard
+      # unpushed work - the same refuse-don't-infer rule the codespace path uses.
+      dirty=$(git -C "$ORCA_WT_PATH" status --porcelain 2>/dev/null) && dirty_rc=0 || dirty_rc=$?
+      unpushed=$(git -C "$ORCA_WT_PATH" log --oneline -n 5 HEAD --not --remotes -- 2>/dev/null) && unpushed_rc=0 || unpushed_rc=$?
+      if [ "$dirty_rc" -ne 0 ] || [ "$unpushed_rc" -ne 0 ]; then
+        echo "REFUSED: could not verify orca worktree $ORCA_WT_PATH is clean (path missing or not a git repo; status rc=$dirty_rc, unpushed rc=$unpushed_rc)." >&2
+        echo "The Orca worktree may live on a remote runtime not reachable from here. Verify the path/connectivity and retry, or get the captain's explicit OK to discard, then --force." >&2
+        exit 1
+      fi
+      if [ -n "$dirty" ] || [ -n "$unpushed" ]; then
+        echo "REFUSED: orca worktree $ORCA_WT_PATH has work not on any remote." >&2
+        [ -n "$dirty" ] && echo "uncommitted changes present" >&2
+        [ -n "$unpushed" ] && printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+        echo "Push the branch (or get the captain's explicit OK to discard, then --force)." >&2
+        exit 1
+      fi
+    fi
+  fi
+
+  # Remove the Orca-managed worktree. The CLI's --force is Orca's own removal
+  # (kills the agent terminal, detaches the checkout); firstmate's safety gate is
+  # the check above, not this flag.
+  if [ -n "$WT" ]; then
+    rm_json=$(orca_cli worktree rm --worktree "$WT" --force --json 2>/dev/null) || {
+      echo "error: 'orca worktree rm' failed for $WT; state left intact." >&2
+      exit 1
+    }
+    if ! printf '%s' "$rm_json" | jq -e '.ok' >/dev/null 2>&1; then
+      echo "error: 'orca worktree rm' returned an error for $WT; state left intact." >&2
+      printf '%s' "$rm_json" | jq -r '.error.message // ""' >&2 || true
+      exit 1
+    fi
+  else
+    echo "warn: no worktree selector in meta for orca task $ID; skipping orca worktree rm" >&2
+  fi
+
+  rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.check.last" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts"
+  echo "teardown $ID complete (orca worktree ${WT:-unknown})"
+  backlog_refresh_reminder
+  exit 0
+fi
+
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if [ "$KIND" = secondmate ]; then
     :
