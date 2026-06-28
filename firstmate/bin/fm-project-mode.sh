@@ -1,18 +1,34 @@
 #!/usr/bin/env bash
 # Resolve a project's delivery mode and yolo flag from the data/projects.md registry.
 # Prints two words to stdout: "<mode> <yolo>" where mode is one of
-# no-mistakes|direct-PR|local-only|codespace and yolo is on|off.
+# no-mistakes|direct-PR|local-only|codespace|orca and yolo is on|off.
 #
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
 #   - <name> [<mode>] - <desc> (added <date>)          -> <mode> off
 #   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
 #   - <name> [codespace owner/repo] - <desc> (...)     -> codespace off, slug owner/repo
+#   - <name> [orca <repo-selector> [<harness>]] - ...  -> orca off, selector + harness
 #
 # With --slug, prints the codespace owner/repo slug from the bracket (the token
 # containing a "/") and nothing else, exiting non-zero if there is none. This lets
 # codespace projects register with NO local clone: owner/repo comes from the
 # registry, not from a clone's origin remote. Usage: fm-project-mode.sh --slug <name>
+#
+# With --orca-selector, prints the Orca repo selector from an [orca <selector>
+# [<harness>]] bracket: the first bracket token after "orca" that is not "+yolo".
+# An Orca crewmate has no local clone either - the selector (id:<id>, name:<repo>,
+# path:<abs>, ...) addresses an Orca-registered repo, so it comes from the
+# registry, not an origin remote. Exits non-zero if there is none.
+# Usage: fm-project-mode.sh --orca-selector <name>
+#
+# With --orca-harness, prints the agent harness an orca crewmate should run,
+# taken from the bracket's optional second token after the selector (any token
+# that is neither "orca", the selector, nor "+yolo"); defaults to "claude". The
+# orca crewmate runs inside the Orca app via `orca worktree create --agent`, so
+# the named harness must be a TUI agent Orca knows. Bracket form:
+#   [orca <repo-selector> [<harness>] [+yolo]]   e.g. [orca name:widget cursor]
+# Usage: fm-project-mode.sh --orca-harness <name>
 #
 # With --codespace-harness, prints the agent harness a codespace crewmate should
 # run, taken from the bracket's optional harness token (any token that is neither
@@ -44,14 +60,22 @@ REG="$DATA/projects.md"
 
 SLUG_MODE=
 CS_HARNESS_MODE=
+ORCA_SELECTOR_MODE=
+ORCA_HARNESS_MODE=
 if [ "${1:-}" = "--slug" ]; then
   SLUG_MODE=1
   shift
 elif [ "${1:-}" = "--codespace-harness" ]; then
   CS_HARNESS_MODE=1
   shift
+elif [ "${1:-}" = "--orca-selector" ]; then
+  ORCA_SELECTOR_MODE=1
+  shift
+elif [ "${1:-}" = "--orca-harness" ]; then
+  ORCA_HARNESS_MODE=1
+  shift
 fi
-NAME=${1:?usage: fm-project-mode.sh [--slug|--codespace-harness] <project-name>}
+NAME=${1:?usage: fm-project-mode.sh [--slug|--codespace-harness|--orca-selector|--orca-harness] <project-name>}
 
 if [ -n "$CS_HARNESS_MODE" ]; then
   # Print the codespace harness token from the [codespace ...] bracket, or
@@ -70,6 +94,57 @@ if [ -n "$CS_HARNESS_MODE" ]; then
             if (a[j]=="codespace" || a[j]=="+yolo" || a[j]=="") continue;
             if (a[j] ~ /\//) continue;   # owner/repo slug
             print a[j]; exit;
+          }
+        }
+        exit
+      }
+    ' "$REG")
+    [ -n "$h" ] && harness=$h
+  fi
+  printf '%s\n' "$harness"
+  exit 0
+fi
+
+if [ -n "$ORCA_SELECTOR_MODE" ]; then
+  # Print the Orca repo selector from the [orca <selector> ...] bracket: the
+  # first bracket token after "orca" that is not "+yolo".
+  [ -f "$REG" ] || exit 1
+  sel=$(awk -v n="$NAME" '
+    $1=="-" && $2==n {
+      if ($3 ~ /^\[/) {
+        s="";
+        for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
+        gsub(/^\[|\]$/, "", s);
+        k = split(s, a, " ");
+        if (a[1] != "orca") exit;
+        for (j=2; j<=k; j++) { if (a[j]=="+yolo" || a[j]=="") continue; print a[j]; exit }
+      }
+      exit
+    }
+  ' "$REG")
+  [ -n "$sel" ] || exit 1
+  printf '%s\n' "$sel"
+  exit 0
+fi
+
+if [ -n "$ORCA_HARNESS_MODE" ]; then
+  # Print the orca harness token: the SECOND non-"+yolo" bracket token after
+  # "orca" (the first is the selector), or "claude" when none is named.
+  harness=claude
+  if [ -f "$REG" ]; then
+    h=$(awk -v n="$NAME" '
+      $1=="-" && $2==n {
+        if ($3 ~ /^\[/) {
+          s="";
+          for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
+          gsub(/^\[|\]$/, "", s);
+          k = split(s, a, " ");
+          if (a[1] != "orca") exit;
+          seen=0;
+          for (j=2; j<=k; j++) {
+            if (a[j]=="+yolo" || a[j]=="") continue;
+            seen++;
+            if (seen==2) { print a[j]; exit }   # 1=selector, 2=harness
           }
         }
         exit
@@ -132,7 +207,7 @@ fi
 mode=${parsed%% *}
 yolo=${parsed##* }
 case "$mode" in
-  no-mistakes|direct-PR|local-only|codespace) ;;
+  no-mistakes|direct-PR|local-only|codespace|orca) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac

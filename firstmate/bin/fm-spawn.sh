@@ -356,7 +356,9 @@ else
   read -r MODE YOLO <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
-  if [ "$MODE" != codespace ]; then
+  # codespace and orca have no local clone (work happens in the Codespace / Orca
+  # app), so don't require a projects/<name> checkout for them.
+  if [ "$MODE" != codespace ] && [ "$MODE" != orca ]; then
     PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
     PROJ_NAME=$(basename "$PROJ_ABS")
   fi
@@ -595,6 +597,108 @@ CHECKEOF
   chmod +x "$STATE/$ID.check.sh"
 
   echo "spawned $ID harness=$CS_HARNESS kind=$KIND mode=codespace yolo=$YOLO window=$T worktree=$_CS_WT codespace=$_CS_NAME"
+  exit 0
+fi
+
+# Orca spawn path: run the crewmate INSIDE the Orca app. No local clone, no tmux
+# pane - `orca worktree create --agent` makes an Orca-managed worktree whose first
+# terminal runs the agent, visible in Orca's own UI. window= stays empty (the
+# watcher's recorded_windows skips empty windows, so no pane-staleness), and a
+# generated check.sh mirrors the Orca agent status into state/<id>.status, which
+# is what wakes firstmate. No per-harness turn-end hook is installed: Orca's agent
+# status replaces it. Structural analogue of the codespace branch above.
+if [ "$MODE" = orca ] && [ "$KIND" != secondmate ]; then
+  # shellcheck source=bin/fm-orca-lib.sh
+  . "$SCRIPT_DIR/fm-orca-lib.sh"
+
+  # Fail clearly if the Orca app/runtime is not ready, before creating anything.
+  orca_preflight || exit 1
+  # Pin the resolved CLI so the generated check.sh uses the same invoker later.
+  _fm_orca_resolve_cli || { echo "error: no Orca CLI found for mode=orca" >&2; exit 1; }
+
+  # Repo selector + harness come from the registry bracket ([orca <selector>
+  # [<harness>]]). The agent runs inside Orca, so the harness must be an Orca TUI
+  # agent (default claude), independent of config/crew-harness.
+  ORCA_SEL=$("$FM_ROOT/bin/fm-project-mode.sh" --orca-selector "$PROJ_NAME" 2>/dev/null || true)
+  if [ -z "$ORCA_SEL" ]; then
+    echo "error: orca project $PROJ_NAME has no repo selector in its registry line; expected '- $PROJ_NAME [orca <repo-selector> [<harness>]] - ...'" >&2
+    exit 1
+  fi
+  ORCA_HARNESS=$("$FM_ROOT/bin/fm-project-mode.sh" --orca-harness "$PROJ_NAME" 2>/dev/null || echo claude)
+  [ -n "$ORCA_HARNESS" ] || ORCA_HARNESS=claude
+
+  # Create the Orca worktree + first agent terminal; --prompt sends the brief as
+  # the agent's initial work. An optional FM_ORCA_BASE_BRANCH pins the base ref
+  # (useful when the repo's default base cannot be refreshed, e.g. offline).
+  ORCA_BASE_ARGS=()
+  [ -n "${FM_ORCA_BASE_BRANCH:-}" ] && ORCA_BASE_ARGS=(--base-branch "$FM_ORCA_BASE_BRANCH")
+  create_json=$(orca_cli worktree create --repo "$ORCA_SEL" --name "fm-$ID" \
+    --agent "$ORCA_HARNESS" --prompt "$(cat "$BRIEF")" "${ORCA_BASE_ARGS[@]}" --json 2>/dev/null) || {
+    echo "error: 'orca worktree create' failed for repo $ORCA_SEL (harness $ORCA_HARNESS); is the Orca app running?" >&2
+    exit 1
+  }
+  if ! printf '%s' "$create_json" | jq -e '.ok' >/dev/null 2>&1; then
+    echo "error: 'orca worktree create' returned an error:" >&2
+    printf '%s' "$create_json" | jq -r '.error.message // "unknown error"' >&2
+    exit 1
+  fi
+  ORCA_WID=$(printf '%s' "$create_json" | jq -r '.result.worktree.id // empty')
+  ORCA_WT_PATH=$(printf '%s' "$create_json" | jq -r '.result.worktree.path // empty')
+  if [ -z "$ORCA_WID" ]; then
+    echo "error: could not parse worktree id from 'orca worktree create' output" >&2
+    exit 1
+  fi
+  ORCA_WT_SEL="id:$ORCA_WID"
+
+  # Record teardown-critical fields the instant the worktree exists, BEFORE the
+  # terminal lookup below, so a later failure under set -eu still leaves meta that
+  # teardown can use to remove the worktree (mirrors the codespace early write).
+  mkdir -p "$STATE"
+  write_orca_meta() {
+    {
+      echo "window="
+      echo "worktree=$ORCA_WT_SEL"
+      echo "worktree_path=$ORCA_WT_PATH"
+      echo "project="
+      echo "repo=$ORCA_SEL"
+      echo "harness=$ORCA_HARNESS"
+      echo "kind=$KIND"
+      echo "mode=orca"
+      echo "engine=orca"
+      echo "yolo=$YOLO"
+      echo "terminal=$1"
+    } > "$STATE/$ID.meta"
+  }
+  write_orca_meta ""
+
+  # Resolve the agent terminal handle (the worktree's first live terminal); it
+  # can take a moment to register after create, so poll briefly.
+  ORCA_TERM=
+  for _ in $(seq 1 "${FM_ORCA_TERM_RETRIES:-15}"); do
+    ORCA_TERM=$(orca_cli terminal list --worktree "$ORCA_WT_SEL" --json 2>/dev/null | jq -r '.result.terminals[0].handle // empty' 2>/dev/null || true)
+    [ -n "$ORCA_TERM" ] && break
+    sleep 1
+  done
+  write_orca_meta "$ORCA_TERM"
+
+  # Generated status poll: source the orca lib and mirror the agent status into
+  # state/<id>.status on change. FM_ORCA_CLI is pinned to the spawn-resolved
+  # invoker so the watcher-run check uses the same CLI. It dedupes via
+  # state/<id>.check.last and prints nothing to stdout (the status append is the
+  # single wake), exactly like the codespace check.sh.
+  cat > "$STATE/$ID.check.sh" <<CHECKEOF
+#!/usr/bin/env bash
+set -u
+FM_HOME=$(shell_quote "$FM_HOME")
+STATE=$(shell_quote "$STATE")
+FM_ORCA_CLI=$(shell_quote "$FM_ORCA_CLI_RESOLVED")
+export FM_ORCA_CLI
+. $(shell_quote "$SCRIPT_DIR/fm-orca-lib.sh")
+orca_check_emit $(shell_quote "$ID") $(shell_quote "$ORCA_WT_SEL")
+CHECKEOF
+  chmod +x "$STATE/$ID.check.sh"
+
+  echo "spawned $ID harness=$ORCA_HARNESS kind=$KIND mode=orca yolo=$YOLO window= worktree=$ORCA_WT_SEL worktree_path=$ORCA_WT_PATH terminal=$ORCA_TERM"
   exit 0
 fi
 
