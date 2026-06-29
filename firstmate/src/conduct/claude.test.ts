@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { ClaudeAdapter } from './adapters/claude.js'
@@ -6,10 +6,26 @@ import type { ConductFrame } from './frames.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const FAKE_CLAUDE = join(__dirname, 'fixtures', 'fake-claude.mjs')
+const FAKE_CLAUDE_SERVE = join(__dirname, 'fixtures', 'fake-claude-serve.mjs')
 
-async function collectFrames(adapter: ClaudeAdapter, prompt: string, options?: { sessionId?: string }): Promise<ConductFrame[]> {
+async function collectFrames(
+  adapter: ClaudeAdapter,
+  prompt: string,
+  options?: { sessionId?: string }
+): Promise<ConductFrame[]> {
   const frames: ConductFrame[] = []
   for await (const frame of adapter.run(prompt, options)) {
+    frames.push(frame)
+  }
+  return frames
+}
+
+async function collectServeTurnFrames(
+  adapter: ClaudeAdapter,
+  prompt: string
+): Promise<ConductFrame[]> {
+  const frames: ConductFrame[] = []
+  for await (const frame of adapter.runServeTurn(prompt)) {
     frames.push(frame)
   }
   return frames
@@ -71,5 +87,21 @@ describe('ClaudeAdapter', () => {
       }
     }
     expect(frameCount).toBeGreaterThan(0)
+  })
+
+  it('handles multiple turns over one persistent serve subprocess', async () => {
+    const adapter = new ClaudeAdapter({ command: 'node', args: [FAKE_CLAUDE_SERVE] })
+    adapter.startServeSession()
+
+    const turn1 = await collectServeTurnFrames(adapter, 'ship dark')
+    expect(turn1.some((f) => f.kind === 'session' && f.sessionId === 'serve-session-1')).toBe(true)
+    expect(turn1.some((f) => f.kind === 'text')).toBe(true)
+    expect(turn1.at(-1)?.kind).toBe('done')
+
+    const turn2 = await collectServeTurnFrames(adapter, 'lets go')
+    expect(turn2.some((f) => f.kind === 'text')).toBe(true)
+    expect(turn2.at(-1)?.kind).toBe('done')
+
+    adapter.kill()
   })
 })

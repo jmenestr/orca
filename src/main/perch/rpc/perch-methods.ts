@@ -7,6 +7,8 @@ import { z } from 'zod'
 import { defineMethod, defineStreamingMethod, type RpcAnyMethod } from '../../runtime/rpc/core'
 import { requiredString } from '../../runtime/rpc/schemas'
 
+import { PERCH_WORK_METHODS } from './perch-work-methods'
+
 let perchSubscriptionSeq = 0
 
 const ConductorSendParams = z.object({
@@ -17,9 +19,13 @@ export const PERCH_METHODS: readonly RpcAnyMethod[] = [
   defineMethod({
     name: 'perch.conductor.send',
     params: ConductorSendParams,
-    handler: (params, { runtime }) => {
-      const service = runtime.getPerchService()
-      service.send(params.text)
+    handler: async (params, { runtime }) => {
+      // Why: give the conductor model a fresh fleet snapshot at the start of each
+      // turn (plan 1b) by prepending it to the model's input — not as a captain-
+      // facing transcript notice. Fleet deltas between turns reach the UI via
+      // perch:workChanged; the next turn's snapshot reflects the latest state.
+      const snapshot = runtime.getPerchFleetService().formatFleetSnapshotForTurn()
+      await runtime.getPerchService().send(params.text, { modelPrefix: snapshot })
       return { ok: true }
     }
   }),
@@ -61,5 +67,7 @@ export const PERCH_METHODS: readonly RpcAnyMethod[] = [
         emit({ type: 'ready', subscriptionId, transcript: service.getTranscript() })
       })
     }
-  })
+  }),
+
+  ...PERCH_WORK_METHODS
 ]

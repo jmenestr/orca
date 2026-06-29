@@ -266,7 +266,7 @@ function WindowControls(): React.JSX.Element {
   )
 }
 
-const Landing = lazy(() => import('./components/Landing'))
+const TodayInbox = lazy(() => import('./components/today/TodayInbox'))
 const WorktreeCreationPanel = lazy(
   () => import('./components/worktree-creation/WorktreeCreationPanel')
 )
@@ -278,6 +278,7 @@ const SkillsPage = lazy(() => import('./components/skills/SkillsPage'))
 const WorkspaceSpacePage = lazy(() => import('./components/workspace-space/WorkspaceSpacePage'))
 const MobilePage = lazy(() => import('./components/mobile/MobilePage'))
 const ConductorPage = lazy(() => import('./perch/ConductorPage'))
+const TaskBoardPage = lazy(() => import('./perch/TaskBoardPage'))
 const QuickOpen = lazy(() => import('./components/QuickOpen'))
 const WorktreeJumpPalette = lazy(() => import('./components/WorktreeJumpPalette'))
 const WorkspaceCleanupDialog = lazy(
@@ -2257,6 +2258,8 @@ function App(): React.JSX.Element {
                               {activeView === 'space' ? <WorkspaceSpacePage /> : null}
                               {activeView === 'mobile' ? <MobilePage /> : null}
                               {activeView === 'conductor' ? <ConductorPage /> : null}
+                              {activeView === 'today' ? <TodayInbox /> : null}
+                              {activeView === 'taskBoard' ? <TaskBoardPage /> : null}
                               {activeView === 'terminal' &&
                               creationLayoutActive &&
                               activePendingCreationId ? (
@@ -2270,7 +2273,7 @@ function App(): React.JSX.Element {
                               {activeView === 'terminal' &&
                               !activeWorktreeId &&
                               !creationLayoutActive ? (
-                                <Landing />
+                                <TodayInbox />
                               ) : null}
                             </RecoverableRenderErrorBoundary>
                           </Suspense>

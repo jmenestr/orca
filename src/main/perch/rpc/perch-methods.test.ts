@@ -1,21 +1,18 @@
 import { describe, expect, it } from 'vitest'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { OrcaRuntimeService } from '../../runtime/orca-runtime'
 import { RpcDispatcher } from '../../runtime/rpc/dispatcher'
 import { PerchDb } from '../perch-db'
+import { PerchFleetService } from '../perch-fleet-service'
 import { PerchService } from '../perch-service'
 
-const FAKE_CONDUCTOR = `
-const readline = require('readline')
-process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess_rpc' }) + '\\n')
-const rl = readline.createInterface({ input: process.stdin })
-rl.on('line', (line) => {
-  let msg
-  try { msg = JSON.parse(line) } catch { return }
-  const content = (msg && msg.message && msg.message.content) || ''
-  process.stdout.write(JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'echo:' + content } } }) + '\\n')
-  process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: 'ok' }) + '\\n')
-})
-`
+const FAKE_CONDUCT_SERVE = join(
+  fileURLToPath(new URL('.', import.meta.url)),
+  '..',
+  'fixtures',
+  'fake-conduct-serve.mjs'
+)
 
 function req(method: string, params?: unknown) {
   return { id: `t-${method}`, authToken: 'test', method, params }
@@ -29,9 +26,16 @@ describe('perch RPC methods round-trip', () => {
       db,
       firstmateDir: process.cwd(),
       command: process.execPath,
-      baseArgs: ['-e', FAKE_CONDUCTOR]
+      spawnArgs: [FAKE_CONDUCT_SERVE]
     })
     runtime.setPerchService(service)
+    runtime.setPerchFleetService(
+      new PerchFleetService({
+        db,
+        getPerchService: () => service,
+        getRuntime: () => runtime
+      })
+    )
     const dispatcher = new RpcDispatcher({ runtime })
 
     const frames: Record<string, unknown>[] = []
@@ -40,7 +44,6 @@ describe('perch RPC methods round-trip', () => {
       resolveResult = resolve
     })
 
-    // Subscribe first so live frames are captured.
     const streaming = dispatcher.dispatchStreaming(req('perch.conductor.subscribe'), (raw) => {
       const envelope = JSON.parse(raw) as { result?: { type?: string } }
       const result = envelope.result
@@ -53,7 +56,6 @@ describe('perch RPC methods round-trip', () => {
       }
     })
 
-    // Give the subscribe handler a tick to register before sending.
     await new Promise((r) => setTimeout(r, 50))
 
     const sendResponse = await dispatcher.dispatch(
@@ -64,12 +66,10 @@ describe('perch RPC methods round-trip', () => {
     try {
       await resultSeen
 
-      // ready envelope arrived with a subscriptionId + persisted transcript shape.
       const ready = frames.find((f) => f.type === 'ready')
       expect(ready).toBeDefined()
       expect(typeof ready!.subscriptionId).toBe('string')
 
-      // a session frame + a text frame echoing the sent turn.
       const session = frames.find(
         (f) => f.type === 'frame' && (f.frame as { kind?: string }).kind === 'session'
       )
@@ -78,9 +78,8 @@ describe('perch RPC methods round-trip', () => {
       const textFrame = frames.find(
         (f) => f.type === 'frame' && (f.frame as { kind?: string }).kind === 'text'
       )
-      expect((textFrame!.frame as { text: string }).text).toContain('hello rpc')
+      expect((textFrame!.frame as { text: string }).text).toContain('hello')
 
-      // Resolve the streaming handler by cleaning up its subscription.
       const ready2 = frames.find((f) => f.type === 'ready') as { subscriptionId: string }
       runtime.cleanupSubscription(ready2.subscriptionId)
       await streaming.catch(() => {})

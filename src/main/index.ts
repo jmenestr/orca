@@ -822,6 +822,16 @@ function openMainWindow(): BrowserWindow {
         return
       }
       maybeAutoRenameBranchOnFirstWorkFromHook({ paneKey, tabId, worktreeId, payload, isReplay })
+      runtime?.getPerchFleetService()?.observeAgentHook({
+        paneKey,
+        tabId,
+        worktreeId,
+        terminalHandle: runtime?.getAgentStatusTerminalHandleForPaneKey(paneKey),
+        agentType: payload.agentType,
+        state: payload.state,
+        prompt: payload.prompt,
+        lastAssistantMessage: payload.lastAssistantMessage ?? undefined
+      })
       const orchestration = runtime?.getAgentStatusOrchestrationContextForPaneKey(paneKey)
       const terminalHandle = runtime?.getAgentStatusTerminalHandleForPaneKey(paneKey)
       mainWindow?.webContents.send('agentStatus:set', {

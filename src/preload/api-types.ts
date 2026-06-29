@@ -2568,6 +2568,7 @@ export type PreloadApi = {
   perch: {
     call: (args: { method: string; params?: unknown }) => Promise<RuntimeRpcResponse<unknown>>
     onChanged: (callback: (frame: unknown) => void) => () => void
+    onWorkChanged: (callback: (item: unknown) => void) => () => void
   }
   runtimeEnvironments: {
     list: () => Promise<PublicKnownRuntimeEnvironment[]>

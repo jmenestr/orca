@@ -3539,6 +3539,11 @@ const api = {
       const listener = (_event: Electron.IpcRendererEvent, frame: unknown) => callback(frame)
       ipcRenderer.on('perch:changed', listener)
       return () => ipcRenderer.removeListener('perch:changed', listener)
+    },
+    onWorkChanged: (callback: (item: unknown) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, item: unknown) => callback(item)
+      ipcRenderer.on('perch:workChanged', listener)
+      return () => ipcRenderer.removeListener('perch:workChanged', listener)
     }
   },
 

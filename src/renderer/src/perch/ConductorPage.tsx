@@ -1,33 +1,108 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowLeft, Loader2, Send, Wand2 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowLeft, ExternalLink, FileText, Loader2, Plus, Send, Wand2, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
 import { useAppStore } from '@/store'
-import type { ConductorMessage } from '@/perch/perch-client'
+import { activateAndRevealWorktree } from '@/lib/worktree-activation'
+import type { ConductorMessage, ConductorNoticeRef } from '@/perch/perch-client'
+import { ConductorDispatchDialog } from '@/perch/ConductorDispatchDialog'
+import { ConductorMarkdownMessage } from '@/perch/ConductorMarkdownMessage'
+import CommentMarkdown from '@/components/sidebar/CommentMarkdown'
 
 // Why: the Conductor view — a plain-language chat with the firstmate conductor
 // that directs real Orca crewmates. Built on Orca's shadcn primitives and the
 // STYLEGUIDE tokens (worktree-sidebar / muted / border roles, 13px body text).
-function ConductorMessageRow({ message }: { message: ConductorMessage }): React.JSX.Element {
+function ConductorMessageRow({
+  message,
+  onOpenPanel,
+  onOpenAgent,
+  isOpenInPanel
+}: {
+  message: ConductorMessage
+  onOpenPanel: (message: ConductorMessage) => void
+  onOpenAgent: (ref: ConductorNoticeRef) => void
+  isOpenInPanel: boolean
+}): React.JSX.Element {
   const isUser = message.role === 'user'
   const isNotice = message.role === 'notice'
+  // Why: only offer the jump when the referenced agent still has a worktree to
+  // reveal; a failed/cancelled dispatch carries a ref with no worktree.
+  const agentRef = message.ref?.worktreeId ? message.ref : null
   return (
     <div className={cn('flex w-full', isUser ? 'justify-end' : 'justify-start')}>
       <div
         className={cn(
-          'max-w-[680px] rounded-lg px-3 py-2 text-[13px] leading-relaxed whitespace-pre-wrap break-words',
-          isUser && 'bg-primary text-primary-foreground',
+          'max-w-[680px] rounded-lg px-3 py-2 text-[13px] leading-relaxed break-words',
+          isUser && 'bg-primary text-primary-foreground whitespace-pre-wrap',
           !isUser && !isNotice && 'bg-muted text-foreground',
-          isNotice && 'border border-border/60 bg-background/40 text-muted-foreground italic'
+          isNotice && 'border border-border/60 bg-background/40 text-muted-foreground italic',
+          isOpenInPanel && 'ring-1 ring-primary/40'
         )}
       >
-        {message.text}
-        {message.streaming ? (
-          <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-current align-middle" />
-        ) : null}
+        {/* Why: the captain's own turns are plain typed text, but the conductor's
+            replies and fleet reports are markdown (headers, tables, lists) that
+            can run long — render them collapsed with a side-panel escape hatch. */}
+        {isUser ? (
+          message.text
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            <ConductorMarkdownMessage
+              text={message.text}
+              streaming={message.streaming}
+              onOpenPanel={() => onOpenPanel(message)}
+              fadeClassName={isNotice ? 'from-background' : 'from-muted'}
+            />
+            {agentRef ? (
+              <button
+                type="button"
+                onClick={() => onOpenAgent(agentRef)}
+                className={cn(
+                  'inline-flex w-fit items-center gap-1 rounded px-1 py-0.5 text-[11px] font-medium not-italic',
+                  'text-primary hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring'
+                )}
+              >
+                <ExternalLink className="size-3" />
+                View {agentRef.title || 'agent'}
+              </button>
+            ) : null}
+          </div>
+        )}
       </div>
     </div>
+  )
+}
+
+// Why: long markdown (a crewmate's full report) is hard to read inline; the side
+// panel gives it a roomy, scrollable surface without leaving the conductor chat.
+function ConductorReportPanel({
+  message,
+  onClose
+}: {
+  message: ConductorMessage
+  onClose: () => void
+}): React.JSX.Element {
+  return (
+    <aside className="flex w-[440px] shrink-0 flex-col border-l border-border bg-background">
+      <div className="flex items-center gap-2 border-b border-border px-4 py-3">
+        <FileText className="size-4 text-muted-foreground" />
+        <h2 className="text-[13px] font-semibold tracking-tight">Report</h2>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="ml-auto size-7"
+          onClick={onClose}
+          aria-label="Close report"
+        >
+          <X className="size-4" />
+        </Button>
+      </div>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="px-4 py-4">
+          <CommentMarkdown content={message.text} variant="document" className="text-[13px]" />
+        </div>
+      </ScrollArea>
+    </aside>
   )
 }
 
@@ -37,9 +112,19 @@ export default function ConductorPage(): React.JSX.Element {
   const sendConductorTurn = useAppStore((s) => s.sendConductorTurn)
   const closeConductorPage = useAppStore((s) => s.closeConductorPage)
   const hydrateConductorTranscript = useAppStore((s) => s.hydrateConductorTranscript)
+  const openActivityPage = useAppStore((s) => s.openActivityPage)
 
   const [draft, setDraft] = useState('')
+  const [dispatchOpen, setDispatchOpen] = useState(false)
+  // Why: track the panel message by id (not the object) so a streaming/finalizing
+  // turn stays in sync and the panel auto-closes if the message disappears.
+  const [panelMessageId, setPanelMessageId] = useState<string | null>(null)
   const viewportRef = useRef<HTMLDivElement>(null)
+
+  const panelMessage = useMemo(
+    () => (panelMessageId ? (transcript.find((m) => m.id === panelMessageId) ?? null) : null),
+    [panelMessageId, transcript]
+  )
 
   useEffect(() => {
     void hydrateConductorTranscript()
@@ -73,6 +158,18 @@ export default function ConductorPage(): React.JSX.Element {
     [submit]
   )
 
+  // Why: jump from a fleet report to the agent that produced it — open Activity
+  // and reveal the agent's worktree, mirroring the fleet strip's open action.
+  const onOpenAgent = useCallback(
+    (ref: ConductorNoticeRef) => {
+      openActivityPage()
+      if (ref.worktreeId) {
+        activateAndRevealWorktree(ref.worktreeId)
+      }
+    },
+    [openActivityPage]
+  )
+
   return (
     <div className="flex h-full w-full flex-col bg-background">
       <header className="flex items-center gap-2 border-b border-border px-4 py-3">
@@ -90,43 +187,80 @@ export default function ConductorPage(): React.JSX.Element {
         <span className="ml-2 text-[12px] text-muted-foreground">
           Direct your fleet in plain language
         </span>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setDispatchOpen(true)}
+          className="ml-auto h-8 gap-1.5"
+        >
+          <Plus className="size-4" />
+          Start agent
+        </Button>
       </header>
 
-      <ScrollArea viewportRef={viewportRef} className="flex-1">
-        <div className="mx-auto flex w-full max-w-[820px] flex-col gap-3 px-4 py-5">
-          {transcript.length === 0 ? (
-            <div className="mt-20 flex flex-col items-center gap-2 text-center text-muted-foreground">
-              <Wand2 className="size-7 opacity-40" />
-              <p className="text-[14px] font-medium text-foreground">Tell the conductor a goal</p>
-              <p className="max-w-[420px] text-[13px]">
-                Describe what you want done and the conductor will dispatch a crewmate to work on it
-                inside Orca - watch it run in the app.
-              </p>
-            </div>
-          ) : (
-            transcript.map((message) => <ConductorMessageRow key={message.id} message={message} />)
-          )}
-        </div>
-      </ScrollArea>
+      <ConductorDispatchDialog open={dispatchOpen} onOpenChange={setDispatchOpen} />
 
-      <div className="border-t border-border px-4 py-3">
-        <div className="mx-auto flex w-full max-w-[820px] items-end gap-2">
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={onKeyDown}
-            rows={1}
-            placeholder="Ship the dark mode toggle in widget…"
-            className={cn(
-              'min-h-[40px] max-h-[160px] flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-[13px]',
-              'placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring'
-            )}
-          />
-          <Button onClick={submit} disabled={draft.trim().length === 0} className="h-10 gap-1.5">
-            {streaming ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-            Send
-          </Button>
+      <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 flex-1 flex-col">
+          <ScrollArea viewportRef={viewportRef} className="min-h-0 flex-1">
+            <div className="mx-auto flex w-full max-w-[820px] flex-col gap-3 px-4 py-5">
+              {transcript.length === 0 ? (
+                <div className="mt-20 flex flex-col items-center gap-2 text-center text-muted-foreground">
+                  <Wand2 className="size-7 opacity-40" />
+                  <p className="text-[14px] font-medium text-foreground">
+                    Tell the conductor a goal
+                  </p>
+                  <p className="max-w-[420px] text-[13px]">
+                    Describe what you want done and the conductor will dispatch a crewmate to work
+                    on it inside Orca - watch it run in the app.
+                  </p>
+                </div>
+              ) : (
+                transcript.map((message) => (
+                  <ConductorMessageRow
+                    key={message.id}
+                    message={message}
+                    onOpenPanel={(m) => setPanelMessageId(m.id)}
+                    onOpenAgent={onOpenAgent}
+                    isOpenInPanel={message.id === panelMessageId}
+                  />
+                ))
+              )}
+            </div>
+          </ScrollArea>
+
+          <div className="border-t border-border px-4 py-3">
+            <div className="mx-auto flex w-full max-w-[820px] items-end gap-2">
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={onKeyDown}
+                rows={1}
+                placeholder="Ship the dark mode toggle in widget…"
+                className={cn(
+                  'min-h-[40px] max-h-[160px] flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-[13px]',
+                  'placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring'
+                )}
+              />
+              <Button
+                onClick={submit}
+                disabled={draft.trim().length === 0}
+                className="h-10 gap-1.5"
+              >
+                {streaming ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Send className="size-4" />
+                )}
+                Send
+              </Button>
+            </div>
+          </div>
         </div>
+
+        {panelMessage ? (
+          <ConductorReportPanel message={panelMessage} onClose={() => setPanelMessageId(null)} />
+        ) : null}
       </div>
     </div>
   )

@@ -5,6 +5,7 @@ import { SearchableSetting } from './SearchableSetting'
 import { matchesSettingsSearch } from './settings-search'
 import { getExperimentalPaneSearchEntries, getExperimentalSearchEntry } from './experimental-search'
 import { HiddenExperimentalGroup } from './HiddenExperimentalGroup'
+import { ConductorHarnessSetting, getConductorHarnessSearchEntry } from './ConductorHarnessSetting'
 import { NumberField, SettingsSwitch } from './SettingsFormControls'
 import { translate } from '@/i18n/i18n'
 import {
@@ -46,6 +47,9 @@ export function ExperimentalPane({
   ])
   const showNewWorktreeCardStyle = matchesSettingsSearch(searchQuery, [
     getExperimentalSearchEntry().newWorktreeCardStyle
+  ])
+  const showConductorHarness = matchesSettingsSearch(searchQuery, [
+    getConductorHarnessSearchEntry().conductorHarness
   ])
   const agentHibernationEnabled = settings.experimentalAgentHibernation === true
   const newWorktreeCardStyleEnabled = settings.experimentalNewWorktreeCardStyle === true
@@ -362,6 +366,10 @@ export function ExperimentalPane({
             </button>
           </div>
         </SearchableSetting>
+      ) : null}
+
+      {showConductorHarness ? (
+        <ConductorHarnessSetting settings={settings} updateSettings={updateSettings} />
       ) : null}
 
       {hiddenExperimentalUnlocked ? <HiddenExperimentalGroup /> : null}

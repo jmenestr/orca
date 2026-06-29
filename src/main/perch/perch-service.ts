@@ -1,65 +1,74 @@
 // Why: PerchService owns the long-lived firstmate "conductor" — the agent the
-// captain directs in plain language from the Perch view. There is no separate
-// conductor binary in firstmate; firstmate IS the conductor, normally a harness
-// agent (claude) reading firstmate/AGENTS.md. Here we run that same agent as a
-// stream-json subprocess (no tmux), with FM_HOST=perch so AGENTS.md skips the
-// session-lock / recovery / watcher machinery (section 0) and dispatches
-// crewmates through the mode=orca adapter. The service line-parses the agent's
-// stream-json stdout into normalized frames, drives turns over stdin, and
-// persists the conductor chat to PerchDb.
+// captain directs in plain language from the Perch view. The conductor runs as
+// `fm conduct serve` (NDJSON ConductFrames on stdout, plain-text turns on stdin)
+// with cwd/FM_HOME set to the vendored firstmate dir and FM_HOST=perch so
+// AGENTS.md skips tmux session-lock / recovery / watcher machinery. Frames are
+// mapped to PerchConductorFrame for the renderer; chat turns persist in PerchDb.
 import { spawn, type ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { PerchDb } from './perch-db'
-import { nowSeconds } from './perch-types'
+import {
+  buildFmConductServeArgs,
+  parseConductFrameLine,
+  resolveFmBin,
+  type ConductFrame,
+  type ConductorHarnessId
+} from './perch-conduct'
+import { normalizeConductorHarnessId } from '../../shared/conductor-harness'
+import { nowSeconds, type ConductorNoticeRef } from './perch-types'
 
-// Why: normalized frames the renderer can render without knowing claude's full
-// stream-json schema. Text deltas drive live streaming; tool/reasoning are
-// status flavor; result closes a turn. Mirrors perch's stream.rs StreamEvent.
 export type PerchConductorFrame =
   | { kind: 'session'; sessionId: string }
   | { kind: 'text'; text: string }
   | { kind: 'reasoning'; text: string }
   | { kind: 'tool'; name: string }
   | { kind: 'result'; isError: boolean; result: string | null }
-  | { kind: 'notice'; text: string }
+  | { kind: 'notice'; text: string; ref?: ConductorNoticeRef | null }
   | { kind: 'error'; message: string }
   | { kind: 'exit'; code: number | null }
 
-// Why: claude's persistent stream-json session — reads newline-delimited user
-// turns from stdin and emits stream-json on stdout until stdin closes.
-// --include-partial-messages gives incremental text deltas for live rendering;
-// --dangerously-skip-permissions keeps the headless conductor from blocking on
-// a permission prompt it cannot answer.
-const DEFAULT_CONDUCTOR_COMMAND = 'claude'
-const DEFAULT_CONDUCTOR_ARGS = [
-  '--print',
-  '--input-format',
-  'stream-json',
-  '--output-format',
-  'stream-json',
-  '--verbose',
-  '--include-partial-messages',
-  '--dangerously-skip-permissions'
-]
-
 const FRAME_EVENT = 'frame'
+const DEFAULT_HARNESS: ConductorHarnessId = 'claude'
+
+// Why: the conductor model cannot reliably observe its own process env, so it
+// must not infer its operating mode from FM_HOST. This system prompt asserts
+// perch mode authoritatively (claude --append-system-prompt) so the conductor
+// never falls back to the tmux bootstrap/recovery/spawn playbook.
+const PERCH_CONDUCTOR_SYSTEM_PROMPT = [
+  'You are the Orca Perch conductor (FM_HOST=perch). This overrides any ambiguity in CLAUDE.md: you ARE running under perch.',
+  'Operate strictly per section 0 of CLAUDE.md. Do NOT run bootstrap, recovery, session locks, watchers, tmux, treehouse, fm-spawn.sh, or clone projects into a projects/ directory. None of that machinery runs under perch.',
+  'You spawn and observe agents ONLY through the `fm perch` CLI:',
+  '- `fm perch repos` lists the repos the captain registered in Orca (resolve project names here).',
+  '- `fm perch dispatch --repo <selector> --title "<title>" --prompt "<full task>"` creates a worktree and launches an agent in Orca.',
+  '- `fm perch list` reports the live fleet.',
+  'Never do project work yourself (no exploring, reading, coding, or investigating a project from this process) - always dispatch an agent and relay its outcome in plain language.',
+  'If the captain names a project that `fm perch repos` does not list, tell the captain to add it in Orca; do not try to clone or register it yourself.'
+].join('\n')
+
+// Why: hard tool-level enforcement of the orchestrator role. The conductor must
+// not spawn its own in-process subagents (Task) — those run inside the conductor
+// and never appear in Orca's fleet — and must not edit projects directly. It
+// dispatches real Orca agents via `fm perch` (Bash) instead.
+const PERCH_CONDUCTOR_DISALLOWED_TOOLS = ['Task', 'Edit', 'Write', 'NotebookEdit'].join(' ')
+
+// Why: a minimal contract so PerchService can inject the conductor bridge's
+// port/token into the subprocess env without depending on the bridge class.
+export type ConductorBridgeHandle = {
+  ensureListening: () => Promise<{ port: number; token: string }>
+}
 
 export type PerchServiceOptions = {
   db: PerchDb
-  // The vendored firstmate dir (cwd + FM_HOME for the conductor). Resolved by
-  // the caller; falls back to resolveFirstmateDir() when omitted.
   firstmateDir?: string
-  // Override the agent command/args (tests, or a non-claude harness).
+  harness?: ConductorHarnessId | string
+  /** Override spawn command (tests). Defaults to process.execPath. */
   command?: string
-  baseArgs?: string[]
+  /** Override full argv (tests). When set, ignores fm conduct serve args. */
+  spawnArgs?: string[]
 }
 
-// Why: locate the vendored firstmate dir from the built main process. Prefer an
-// explicit env override (live verification / packaged layouts), then walk up
-// from this module toward the repo root looking for firstmate/bin/fm-orca-lib.sh
-// (the M1 adapter that proves it's the vendored copy), then fall back to cwd.
 export function resolveFirstmateDir(): string {
   const fromEnv = process.env.PERCH_FIRSTMATE_DIR
   if (fromEnv && existsSync(join(fromEnv, 'bin', 'fm-orca-lib.sh'))) {
@@ -83,30 +92,28 @@ export function resolveFirstmateDir(): string {
 export class PerchService {
   private readonly db: PerchDb
   private readonly firstmateDir: string
-  private readonly command: string
-  private readonly baseArgs: string[]
+  readonly harness: ConductorHarnessId
+  private readonly spawnCommand: string
+  private readonly spawnArgsOverride: string[] | undefined
   private readonly emitter = new EventEmitter()
 
   private child: ChildProcess | null = null
   private sessionId: string | null = null
   private stdoutBuffer = ''
-  // Why: text deltas stream in across many frames; accumulate the current
-  // turn's assistant text so the whole reply persists as one transcript turn
-  // when the turn's `result` frame lands.
   private assistantBuffer = ''
+  private bridge: ConductorBridgeHandle | null = null
 
   constructor(options: PerchServiceOptions) {
     this.db = options.db
     this.firstmateDir = options.firstmateDir ?? resolveFirstmateDir()
-    this.command = options.command ?? process.env.PERCH_CONDUCTOR_CMD ?? DEFAULT_CONDUCTOR_COMMAND
-    this.baseArgs = options.baseArgs ?? DEFAULT_CONDUCTOR_ARGS
-    // Why: cap listeners high — every renderer subscription and the push-bus
-    // notifier attach here, and reconnects can briefly overlap.
+    this.harness = normalizeConductorHarnessId(
+      process.env.PERCH_CONDUCTOR_HARNESS ?? options.harness ?? DEFAULT_HARNESS
+    )
+    this.spawnCommand = options.command ?? process.execPath
+    this.spawnArgsOverride = options.spawnArgs
     this.emitter.setMaxListeners(0)
   }
 
-  // Why: subscribers receive every normalized frame. Returns an unsubscribe so
-  // RPC stream handlers and the main-window notifier clean up on disconnect.
   subscribe(listener: (frame: PerchConductorFrame) => void): () => void {
     this.emitter.on(FRAME_EVENT, listener)
     return () => {
@@ -114,27 +121,41 @@ export class PerchService {
     }
   }
 
+  // Why: lets the runtime attach the conductor bridge so its port/token reach
+  // the subprocess env. Set before the first send so the first spawn carries it.
+  setConductorBridge(bridge: ConductorBridgeHandle): void {
+    this.bridge = bridge
+  }
+
   isRunning(): boolean {
     return this.child !== null && this.child.exitCode === null && !this.child.killed
   }
 
-  // Why: lazy-spawn — the conductor process starts on the first turn, not at
-  // app boot, so an idle Perch view costs nothing.
-  ensureConductor(): void {
+  async ensureConductor(): Promise<void> {
     if (this.isRunning()) {
       return
     }
-    this.spawnConductor()
+    // Why: the bridge must be listening before spawn so PERCH_BRIDGE_PORT is
+    // captured in the conductor's env (subprocess env is fixed at spawn time).
+    const bridgeEnv = this.bridge ? await this.bridge.ensureListening() : null
+    this.spawnConductor(
+      bridgeEnv
+        ? { PERCH_BRIDGE_PORT: String(bridgeEnv.port), PERCH_BRIDGE_TOKEN: bridgeEnv.token }
+        : {}
+    )
   }
 
-  // Direct the conductor with a plain-language turn. Persists the user turn,
-  // then writes a stream-json user message to the agent's stdin.
-  send(text: string): void {
-    this.ensureConductor()
+  // Why: `modelPrefix` carries internal context (e.g. the per-turn fleet
+  // snapshot) that the conductor model must see but that is not the captain's
+  // words — so it is prepended to the model's stdin turn but never persisted as
+  // a user transcript entry.
+  async send(text: string, options?: { modelPrefix?: string }): Promise<void> {
+    await this.ensureConductor()
     this.db.appendConductorTurn('user', text, nowSeconds())
-    const line = JSON.stringify({ type: 'user', message: { role: 'user', content: text } })
+    const prefix = options?.modelPrefix?.trim()
+    const modelInput = prefix && prefix.length > 0 ? `${prefix}\n\n${text}` : text
     try {
-      this.child?.stdin?.write(`${line}\n`)
+      this.child?.stdin?.write(`${modelInput}\n`)
     } catch (err) {
       this.emitFrame({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
     }
@@ -144,7 +165,18 @@ export class PerchService {
     return this.db.conductorTranscript()
   }
 
-  // Kill the conductor (app quit). Idempotent.
+  // Why: fleet deltas and takeover notices reach the conductor transcript without
+  // requiring a subprocess round-trip. An optional ref links the notice back to
+  // the Task/agent that produced it so the chat can offer a "view agent" link.
+  pushNotice(text: string, ref?: ConductorNoticeRef | null): void {
+    const trimmed = text.trim()
+    if (trimmed.length === 0) {
+      return
+    }
+    this.db.appendConductorTurn('notice', trimmed, nowSeconds(), ref ?? null)
+    this.emitFrame({ kind: 'notice', text: trimmed, ref: ref ?? null })
+  }
+
   kill(): void {
     if (!this.child) {
       return
@@ -159,26 +191,24 @@ export class PerchService {
     child.kill('SIGTERM')
   }
 
-  private spawnConductor(): void {
-    // Why: --resume reattaches to the same agent session across a respawn (e.g.
-    // a per-turn harness, or a claude build that exits after a turn), so the
-    // conductor keeps its memory of the fleet it is directing.
-    const args = this.sessionId
-      ? [...this.baseArgs, '--resume', this.sessionId]
-      : [...this.baseArgs]
+  private spawnConductor(extraEnv: Record<string, string> = {}): void {
+    const args =
+      this.spawnArgsOverride ??
+      (() => {
+        const fmBin = resolveFmBin(this.firstmateDir)
+        return [fmBin, ...buildFmConductServeArgs(this.firstmateDir, this.harness, this.sessionId)]
+      })()
 
-    const child = spawn(this.command, args, {
+    const child = spawn(this.spawnCommand, args, {
       cwd: this.firstmateDir,
       env: {
         ...process.env,
-        // Why: FM_HOME points operational dirs at the firstmate dir; FM_HOST
-        // signals the perch context so AGENTS.md/bootstrap/fm-lock skip tmux
-        // session-lock, recovery, and the watcher (section 0).
         FM_HOME: this.firstmateDir,
         FM_HOST: 'perch',
-        // Why: silence claude's interactive prompt-suggestion ghost text, matching
-        // firstmate's own crewmate launches.
-        CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: 'false'
+        CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: 'false',
+        FM_CONDUCT_APPEND_SYSTEM_PROMPT: PERCH_CONDUCTOR_SYSTEM_PROMPT,
+        FM_CONDUCT_DISALLOWED_TOOLS: PERCH_CONDUCTOR_DISALLOWED_TOOLS,
+        ...extraEnv
       },
       stdio: ['pipe', 'pipe', 'pipe']
     })
@@ -189,8 +219,6 @@ export class PerchService {
     child.stdout?.setEncoding('utf8')
     child.stdout?.on('data', (chunk: string) => this.handleStdout(chunk))
 
-    // Why: drop stderr from the parsed stream — it carries diagnostics/heartbeats,
-    // never conductor frames. Surface it to the main log for debugging only.
     child.stderr?.setEncoding('utf8')
     child.stderr?.on('data', (chunk: string) => {
       if (process.env.PERCH_DEBUG) {
@@ -209,8 +237,6 @@ export class PerchService {
     })
   }
 
-  // Why: stream-json is newline-delimited JSON; buffer partial chunks and parse
-  // one complete line at a time. A non-JSON line (a stray log) is ignored.
   private handleStdout(chunk: string): void {
     this.stdoutBuffer += chunk
     let newlineIndex = this.stdoutBuffer.indexOf('\n')
@@ -218,71 +244,54 @@ export class PerchService {
       const line = this.stdoutBuffer.slice(0, newlineIndex).trim()
       this.stdoutBuffer = this.stdoutBuffer.slice(newlineIndex + 1)
       if (line.length > 0) {
-        this.parseLine(line)
+        this.handleConductFrame(line)
       }
       newlineIndex = this.stdoutBuffer.indexOf('\n')
     }
   }
 
-  private parseLine(line: string): void {
-    let obj: Record<string, unknown>
-    try {
-      obj = JSON.parse(line) as Record<string, unknown>
-    } catch {
+  private handleConductFrame(line: string): void {
+    const frame = parseConductFrameLine(line)
+    if (!frame) {
       return
     }
-    const type = obj.type
-
-    if (type === 'system') {
-      const sessionId = typeof obj.session_id === 'string' ? obj.session_id : null
-      if (sessionId) {
-        this.sessionId = sessionId
-        this.emitFrame({ kind: 'session', sessionId })
-      }
-      return
-    }
-
-    if (type === 'stream_event') {
-      this.parseStreamEvent(obj.event as Record<string, unknown> | undefined)
-      return
-    }
-
-    // Why: cumulative `assistant` snapshots repeat the full message each frame;
-    // we assemble text from the incremental deltas instead (avoids duplication),
-    // exactly as perch's stream.rs does. So snapshots are ignored here.
-    if (type === 'result') {
-      const isError = obj.is_error === true
-      const result = typeof obj.result === 'string' ? obj.result : null
-      const text = this.assistantBuffer.trim() || result || ''
-      if (text.length > 0) {
-        this.db.appendConductorTurn(isError ? 'notice' : 'assistant', text, nowSeconds())
-      }
-      this.assistantBuffer = ''
-      this.emitFrame({ kind: 'result', isError, result })
-    }
+    this.mapConductFrame(frame)
   }
 
-  private parseStreamEvent(event: Record<string, unknown> | undefined): void {
-    if (!event) {
-      return
-    }
-    const eventType = event.type
-
-    if (eventType === 'content_block_start') {
-      const block = event.content_block as Record<string, unknown> | undefined
-      if (block?.type === 'tool_use' && typeof block.name === 'string') {
-        this.emitFrame({ kind: 'tool', name: block.name })
-      }
-      return
-    }
-
-    if (eventType === 'content_block_delta') {
-      const delta = event.delta as Record<string, unknown> | undefined
-      if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
-        this.assistantBuffer += delta.text
-        this.emitFrame({ kind: 'text', text: delta.text })
-      } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
-        this.emitFrame({ kind: 'reasoning', text: delta.thinking })
+  private mapConductFrame(frame: ConductFrame): void {
+    switch (frame.kind) {
+      case 'session':
+        this.sessionId = frame.sessionId
+        this.emitFrame({ kind: 'session', sessionId: frame.sessionId })
+        return
+      case 'text':
+        this.assistantBuffer += frame.delta
+        this.emitFrame({ kind: 'text', text: frame.delta })
+        return
+      case 'reasoning':
+        // Why: surface chain-of-thought as a distinct frame the renderer can
+        // ignore (or later reveal), and never fold it into the persisted
+        // assistant turn so the chat shows the reply, not the thinking.
+        this.emitFrame({ kind: 'reasoning', text: frame.delta })
+        return
+      case 'tool':
+        this.emitFrame({ kind: 'tool', name: frame.name })
+        return
+      case 'error':
+        this.emitFrame({ kind: 'error', message: frame.message })
+        return
+      case 'done': {
+        const text = this.assistantBuffer.trim()
+        const isError = frame.exitCode !== 0
+        if (text.length > 0) {
+          this.db.appendConductorTurn(isError ? 'notice' : 'assistant', text, nowSeconds())
+        }
+        this.assistantBuffer = ''
+        this.emitFrame({
+          kind: 'result',
+          isError,
+          result: text.length > 0 ? text : null
+        })
       }
     }
   }

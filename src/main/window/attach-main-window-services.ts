@@ -347,7 +347,8 @@ function registerRuntimeWindowLifecycle(
       send('runtime:browserDriverChanged', { browserPageId, driver }),
     // Why: push Perch conductor stream-json frames to the renderer; the desktop
     // Conductor view subscribes via window.api.perch.onChanged.
-    perchChanged: (frame) => send('perch:changed', frame)
+    perchChanged: (frame) => send('perch:changed', frame),
+    perchWorkChanged: (item) => send('perch:workChanged', item)
   })
   // Why: the runtime must fail closed while the renderer graph is being torn
   // down or rebuilt, otherwise future CLI calls could act on stale terminal

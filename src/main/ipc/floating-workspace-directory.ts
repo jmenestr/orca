@@ -77,7 +77,7 @@ export async function ensureDefaultFloatingWorkspacePath(): Promise<string> {
 }
 
 export async function resolveFloatingTerminalCwd(
-  store: Store,
+  store: Pick<Store, 'getSettings'>,
   args?: FloatingTerminalCwdRequest
 ): Promise<string> {
   const configuredPath = typeof args?.path === 'string' ? args.path.trim() : ''

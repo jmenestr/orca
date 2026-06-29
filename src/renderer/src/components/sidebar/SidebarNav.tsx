@@ -1,5 +1,5 @@
 import React from 'react'
-import { Bell, CalendarClock, Search, Smartphone } from 'lucide-react'
+import { Bell, CalendarClock, Home, Search, Smartphone } from 'lucide-react'
 import { useAppStore } from '@/store'
 import { cn } from '@/lib/utils'
 import type { GlobalSettings } from '../../../../shared/types'
@@ -38,6 +38,7 @@ const SidebarNav = React.memo(function SidebarNav() {
   const openAutomationsPage = useAppStore((s) => s.openAutomationsPage)
   const openActivityPage = useAppStore((s) => s.openActivityPage)
   const openMobilePage = useAppStore((s) => s.openMobilePage)
+  const setActiveView = useAppStore((s) => s.setActiveView)
   const openModal = useAppStore((s) => s.openModal)
   const updateSettings = useAppStore((s) => s.updateSettings)
   const activeView = useAppStore((s) => s.activeView)
@@ -45,6 +46,7 @@ const SidebarNav = React.memo(function SidebarNav() {
   const showAutomationsButton = useAppStore((s) => shouldShowAutomationsButton(s.settings))
   const showMobileButton = useAppStore((s) => shouldShowMobileButton(s.settings))
 
+  const homeActive = activeView === 'today'
   const automationsActive = activeView === 'automations'
   const activityActive = activeView === 'activity'
   const mobileActive = activeView === 'mobile'
@@ -62,6 +64,25 @@ const SidebarNav = React.memo(function SidebarNav() {
       className="flex flex-col gap-0.5 px-2 pt-2 pb-1"
       data-contextual-tour-target="sidebar-navigation"
     >
+      <button
+        type="button"
+        onClick={() => setActiveView('today')}
+        aria-current={homeActive ? 'page' : undefined}
+        className={cn(
+          'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] font-medium tracking-tight transition-colors',
+          homeActive
+            ? 'bg-worktree-sidebar-accent text-worktree-sidebar-accent-foreground'
+            : 'text-worktree-sidebar-foreground/60 hover:bg-worktree-sidebar-foreground/8'
+        )}
+      >
+        <Home
+          className={cn('size-4 shrink-0', !homeActive && 'text-worktree-sidebar-foreground/30')}
+          strokeWidth={homeActive ? 2.25 : 1.75}
+        />
+        <span className="flex-1">
+          {translate('auto.components.sidebar.SidebarNav.home', 'Home')}
+        </span>
+      </button>
       <SetupGuideSidebarEntry />
       <SidebarTaskNavButton />
       <PerchSidebarNav />
