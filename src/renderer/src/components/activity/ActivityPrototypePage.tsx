@@ -10,7 +10,8 @@ import {
   MessageSquareText,
   MoreVertical,
   Search,
-  TerminalSquare
+  TerminalSquare,
+  Wand2
 } from 'lucide-react'
 
 import { AgentStateDot, agentStateLabel } from '@/components/AgentStateDot'
@@ -68,6 +69,13 @@ import { isClipboardTextByteLengthOverLimit } from '../../../../shared/clipboard
 import { migrationUnsupportedToAgentStatusEntry } from '@/lib/migration-unsupported-agent-entry'
 import { translate } from '@/i18n/i18n'
 import { getAgentRowPrimaryText } from '@/lib/agent-row-primary-text'
+import {
+  attentionLabel,
+  deriveWorkAttention,
+  deriveWorkProgress,
+  progressLabel,
+  type Task
+} from '@/perch/perch-client'
 
 type ThreadReadFilter = 'all' | 'unread'
 type ActivityGroupBy = 'status' | 'project' | 'worktree' | 'agent'
@@ -117,6 +125,7 @@ type AgentPaneThread = {
   events: ActivityEvent[]
   migrationUnsupportedPtyId?: string
   unread: boolean
+  task?: Task | null
 }
 
 type ActivityThreadGroup = {
@@ -1224,8 +1233,22 @@ function ThreadRow({
             )}
             title={compactMode ? thread.paneTitle : undefined}
           >
-            {thread.paneTitle}
+            {thread.task?.title ?? thread.paneTitle}
           </span>
+          {thread.task ? (
+            <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+              <span>{progressLabel(deriveWorkProgress(thread.task))}</span>
+              {(() => {
+                const label = attentionLabel(deriveWorkAttention(thread.task))
+                return label ? (
+                  <span className="text-amber-600 dark:text-amber-400">{label}</span>
+                ) : null
+              })()}
+              {thread.task.source === 'directive' ? (
+                <span className="rounded bg-primary/10 px-1 py-px text-primary">conductor</span>
+              ) : null}
+            </span>
+          ) : null}
           {!compactMode && renderedResponsePreview ? (
             <CommentMarkdown
               content={renderedResponsePreview}
@@ -1345,6 +1368,7 @@ function ThreadRow({
 
 export default function ActivityPrototypePage(): React.JSX.Element {
   const [readFilter, setReadFilter] = useState<ThreadReadFilter>('all')
+  const [fleetOnlyFilter, setFleetOnlyFilter] = useState(false)
   const [groupBy, setGroupBy] = useState<ActivityGroupBy>('status')
   const [query, setQuery] = useState('')
   const activityFilterInputRef = useRef<HTMLInputElement | null>(null)
@@ -1384,13 +1408,20 @@ export default function ActivityPrototypePage(): React.JSX.Element {
       repoMap: getRepoMapFromState(s),
       acknowledgedAgentsByPaneKey: s.acknowledgedAgentsByPaneKey,
       acknowledgeAgents: s.acknowledgeAgents,
-      unacknowledgeAgents: s.unacknowledgeAgents
+      unacknowledgeAgents: s.unacknowledgeAgents,
+      conductorTasksByPaneKey: s.conductorTasksByPaneKey,
+      hydrateConductorFleet: s.hydrateConductorFleet,
+      setTaskControlMode: s.setTaskControlMode
     }))
   )
   // Why: agentStatusEpoch is included in the dependency array (but not in the
   // computation itself) so the memo recomputes when freshness boundaries expire,
   // even if no new PTY data arrives.
   const agentStatusEpoch = useAppStore((s) => s.agentStatusEpoch)
+
+  useEffect(() => {
+    void storeData.hydrateConductorFleet()
+  }, [storeData.hydrateConductorFleet])
 
   const { events: allEvents, liveAgentByPaneKey } = useMemo(
     () =>
@@ -1412,10 +1443,13 @@ export default function ActivityPrototypePage(): React.JSX.Element {
     [storeData, agentStatusEpoch]
   )
 
-  const allThreads = useMemo(
-    () => buildAgentPaneThreads({ events: allEvents, liveAgentByPaneKey }),
-    [allEvents, liveAgentByPaneKey]
-  )
+  const allThreads = useMemo(() => {
+    const threads = buildAgentPaneThreads({ events: allEvents, liveAgentByPaneKey })
+    return threads.map((thread) => ({
+      ...thread,
+      task: storeData.conductorTasksByPaneKey[thread.paneKey] ?? null
+    }))
+  }, [allEvents, liveAgentByPaneKey, storeData.conductorTasksByPaneKey])
   const selectedPaneKeyIsLive =
     selectedPaneKey === null || allThreads.some((thread) => thread.paneKey === selectedPaneKey)
   const effectiveSelectedPaneKey = selectedPaneKeyIsLive ? selectedPaneKey : null
@@ -1428,6 +1462,9 @@ export default function ActivityPrototypePage(): React.JSX.Element {
   const visibleThreads = useMemo(() => {
     const normalizedQuery = isActivitySearchQueryTooLarge(query) ? null : query.trim().toLowerCase()
     return allThreads.filter((thread) => {
+      if (fleetOnlyFilter && !thread.task) {
+        return false
+      }
       // Why: keep the just-selected thread visible even after auto-mark-read
       // flips it to read, otherwise clicking a row in unread-only mode makes it
       // vanish from the left list while staying selected on the right.
@@ -1443,7 +1480,7 @@ export default function ActivityPrototypePage(): React.JSX.Element {
       }
       return activityThreadMatchesSearchQuery({ thread, searchQuery: normalizedQuery })
     })
-  }, [allThreads, readFilter, query, effectiveSelectedPaneKey])
+  }, [allThreads, readFilter, query, effectiveSelectedPaneKey, fleetOnlyFilter])
   const visibleThreadGroups = useMemo(
     () => buildActivityThreadGroups(visibleThreads, groupBy),
     [visibleThreads, groupBy]
@@ -1674,6 +1711,9 @@ export default function ActivityPrototypePage(): React.JSX.Element {
   const selectThread = (thread: AgentPaneThread): void => {
     setSelectedPaneKey(thread.paneKey)
     activateThreadTerminal(thread)
+    if (thread.task && thread.task.controlMode !== 'captain') {
+      void storeData.setTaskControlMode(thread.task.id, 'captain')
+    }
   }
 
   useEffect(() => {
@@ -1790,6 +1830,26 @@ export default function ActivityPrototypePage(): React.JSX.Element {
                   </SelectItem>
                 </SelectContent>
               </Select>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Toggle
+                    pressed={fleetOnlyFilter}
+                    onPressedChange={setFleetOnlyFilter}
+                    variant="outline"
+                    size="sm"
+                    className={cn(
+                      'size-8 shrink-0 p-0',
+                      fleetOnlyFilter
+                        ? '!border-primary !bg-primary !text-primary-foreground shadow-xs ring-2 ring-primary/35 hover:!bg-primary/90 hover:!text-primary-foreground'
+                        : 'text-muted-foreground hover:text-foreground'
+                    )}
+                    aria-label="Show conductor fleet threads only"
+                  >
+                    <Wand2 className="size-3.5" />
+                  </Toggle>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">Conductor fleet only</TooltipContent>
+              </Tooltip>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Toggle
@@ -1951,7 +2011,7 @@ export default function ActivityPrototypePage(): React.JSX.Element {
                       </span>
                     </span>
                     <h2 className="line-clamp-3 break-words text-sm font-semibold leading-snug">
-                      {selectedThread.paneTitle}
+                      {selectedThread.task?.title ?? selectedThread.paneTitle}
                     </h2>
                   </div>
                   <div className="mt-1 flex min-w-0 items-center gap-1.5 pl-11">
@@ -1959,6 +2019,18 @@ export default function ActivityPrototypePage(): React.JSX.Element {
                     <span className="truncate text-xs text-muted-foreground">
                       {selectedThread.worktree.displayName}
                     </span>
+                    {selectedThread.task?.controlMode === 'captain' ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="ml-auto h-7 shrink-0 px-2 text-[11px]"
+                        onClick={() => {
+                          void storeData.setTaskControlMode(selectedThread.task!.id, 'conductor')
+                        }}
+                      >
+                        Return to conductor
+                      </Button>
+                    ) : null}
                   </div>
                 </div>
               </div>

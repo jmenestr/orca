@@ -194,12 +194,13 @@ export const AGENT_STATUS_TOOL_NAME_MAX_LENGTH = 60
 export const AGENT_STATUS_TOOL_INPUT_MAX_LENGTH = 160
 /** Maximum character length for the lastAssistantMessage preview.
  *  Why: assistant messages are the user-facing "what did the agent say" body,
- *  expanded inline in the dashboard row. 8 KB comfortably fits a multi-
- *  paragraph summary while still providing a hard upper bound — the hook
- *  HTTP endpoint already caps bodies at 1 MB, but per-field truncation is a
- *  second line of defense against a buggy/malicious agent spamming huge
- *  strings into the cache (which lives per pane with bounded history). */
-export const AGENT_STATUS_ASSISTANT_MESSAGE_MAX_LENGTH = 8000
+ *  expanded inline in the dashboard row and surfaced as the conductor fleet
+ *  report. 32 KB supports large, multi-section summaries (e.g. a thorough repo
+ *  report) while still providing a hard upper bound — the hook HTTP endpoint
+ *  already caps bodies at 1 MB, but per-field truncation is a second line of
+ *  defense against a buggy/malicious agent spamming huge strings into the cache
+ *  (which lives per pane with bounded history). */
+export const AGENT_STATUS_ASSISTANT_MESSAGE_MAX_LENGTH = 32 * 1024
 /**
  * Freshness threshold for explicit agent status. Retained past this point so
  * WorktreeCard's sidebar dot can decay "working" back to "active" when the

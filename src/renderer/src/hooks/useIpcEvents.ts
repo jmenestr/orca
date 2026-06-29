@@ -45,6 +45,7 @@ import {
   handleSwitchTabAcrossAllTypes,
   handleSwitchTerminalTab
 } from './ipc-tab-switch'
+import { subscribeConductorEvents, subscribeConductorFleetEvents } from '@/perch/use-perch-events'
 import { ensureSimulatorTab } from '@/lib/ensure-simulator-tab'
 import { openMobileEmulatorTab } from '@/lib/open-mobile-emulator-tab'
 import {
@@ -812,6 +813,9 @@ export function useIpcEvents(): void {
     let pendingAgentStatusRetryTimer: ReturnType<typeof setTimeout> | null = null
 
     unsubs.push(attachMobileMarkdownBridge())
+    // Why: route Perch conductor stream-json frames into the store slice.
+    unsubs.push(subscribeConductorEvents())
+    unsubs.push(subscribeConductorFleetEvents())
 
     const handleWorktreesChanged = async (
       repoId: string,

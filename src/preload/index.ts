@@ -3529,6 +3529,24 @@ const api = {
     }
   },
 
+  // Why: Perch reuses the runtime:call door for one-shot conductor methods
+  // (perch.conductor.send) and a dedicated perch:changed push channel for the
+  // live conductor stream, mirroring how other features split call + onChanged.
+  perch: {
+    call: (args: { method: string; params?: unknown }): Promise<RuntimeRpcResponse<unknown>> =>
+      ipcRenderer.invoke('runtime:call', args),
+    onChanged: (callback: (frame: unknown) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, frame: unknown) => callback(frame)
+      ipcRenderer.on('perch:changed', listener)
+      return () => ipcRenderer.removeListener('perch:changed', listener)
+    },
+    onWorkChanged: (callback: (item: unknown) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, item: unknown) => callback(item)
+      ipcRenderer.on('perch:workChanged', listener)
+      return () => ipcRenderer.removeListener('perch:workChanged', listener)
+    }
+  },
+
   runtimeEnvironments: {
     list: (): Promise<PublicKnownRuntimeEnvironment[]> =>
       ipcRenderer.invoke('runtimeEnvironments:list'),

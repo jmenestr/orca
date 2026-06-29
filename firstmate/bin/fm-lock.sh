@@ -14,6 +14,15 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
+# Why: under FM_HOST=perch the conductor runs as one stateless stream-json
+# subprocess with no tmux session and no peer firstmate to contend with, so the
+# session lock is moot; acquiring it would also fail because there is no harness
+# process in this subprocess's ancestry. Trust the perch host and no-op.
+if [ "${FM_HOST:-}" = "perch" ]; then
+  echo "lock: skipped (FM_HOST=perch)"
+  exit 0
+fi
+
 # Known harness command names; extend when a new adapter is verified.
 HARNESS_RE='claude|codex|opencode|cursor|^pi$'
 

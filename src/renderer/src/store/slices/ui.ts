@@ -553,6 +553,9 @@ export type UISlice = {
     | 'space'
     | 'skills'
     | 'mobile'
+    | 'conductor'
+    | 'taskBoard'
+    | 'today'
   previousViewBeforeTasks:
     | 'terminal'
     | 'settings'
@@ -561,6 +564,9 @@ export type UISlice = {
     | 'space'
     | 'skills'
     | 'mobile'
+    | 'conductor'
+    | 'taskBoard'
+    | 'today'
   previousViewBeforeSettings:
     | 'terminal'
     | 'tasks'
@@ -569,6 +575,9 @@ export type UISlice = {
     | 'space'
     | 'skills'
     | 'mobile'
+    | 'conductor'
+    | 'taskBoard'
+    | 'today'
   previousViewBeforeActivity:
     | 'terminal'
     | 'settings'
@@ -577,6 +586,9 @@ export type UISlice = {
     | 'space'
     | 'skills'
     | 'mobile'
+    | 'conductor'
+    | 'taskBoard'
+    | 'today'
   previousViewBeforeAutomations:
     | 'terminal'
     | 'settings'
@@ -585,6 +597,9 @@ export type UISlice = {
     | 'space'
     | 'skills'
     | 'mobile'
+    | 'conductor'
+    | 'taskBoard'
+    | 'today'
   previousViewBeforeSpace:
     | 'terminal'
     | 'settings'
@@ -593,6 +608,9 @@ export type UISlice = {
     | 'automations'
     | 'skills'
     | 'mobile'
+    | 'conductor'
+    | 'taskBoard'
+    | 'today'
   previousViewBeforeSkills:
     | 'terminal'
     | 'settings'
@@ -601,6 +619,9 @@ export type UISlice = {
     | 'automations'
     | 'space'
     | 'mobile'
+    | 'conductor'
+    | 'taskBoard'
+    | 'today'
   previousViewBeforeMobile:
     | 'terminal'
     | 'settings'
@@ -609,6 +630,34 @@ export type UISlice = {
     | 'automations'
     | 'space'
     | 'skills'
+    | 'conductor'
+    | 'taskBoard'
+    | 'today'
+  // Why: the view to restore when the Conductor page closes; mirrors the other
+  // previousViewBefore* fields (all views except 'conductor' itself).
+  previousViewBeforeConductor:
+    | 'terminal'
+    | 'settings'
+    | 'tasks'
+    | 'activity'
+    | 'automations'
+    | 'space'
+    | 'skills'
+    | 'mobile'
+    | 'taskBoard'
+    | 'today'
+  // Why: the view to restore when the Task board closes (all views except itself).
+  previousViewBeforeTaskBoard:
+    | 'terminal'
+    | 'settings'
+    | 'tasks'
+    | 'activity'
+    | 'automations'
+    | 'space'
+    | 'skills'
+    | 'mobile'
+    | 'conductor'
+    | 'today'
   setActiveView: (view: UISlice['activeView']) => void
   taskPageData: {
     preselectedRepoId?: string
@@ -1136,6 +1185,8 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set, get)
   previousViewBeforeSpace: 'terminal',
   previousViewBeforeSkills: 'terminal',
   previousViewBeforeMobile: 'terminal',
+  previousViewBeforeConductor: 'terminal',
+  previousViewBeforeTaskBoard: 'terminal',
   setActiveView: (view) => set({ activeView: view }),
   taskPageData: {},
   taskResumeState: undefined,

@@ -234,8 +234,11 @@ export default function WorkspaceKanbanDrawer({
   }, [])
   const maybeSyncWorkspaceBoardTaskStatuses = useCallback(
     (worktreeIds: readonly string[], status: WorkspaceStatus) => {
+      // Why: the worktree->Linear writer is retired (plan Phase 3). The perch
+      // Task is now the single Linear sync hub, so the workspace board never
+      // writes issue state itself - this prevents the dual-writer collision.
       const request = getWorkspaceBoardTaskStatusSyncRequest({
-        enabled: syncTaskStatusFromWorkspaceBoard,
+        enabled: false,
         worktreeIds,
         status,
         worktreesById: worktreeById,

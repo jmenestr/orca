@@ -1,5 +1,5 @@
 /* eslint-disable max-lines */
-import type { ExecutionHostId } from './execution-host'
+import type { ConductorHarnessId } from './conductor-harness'
 import type { SshRemotePtyLease, SshTarget } from './ssh-types'
 import type { Automation, AutomationExecutionTargetType, AutomationRun } from './automations-types'
 import type { WorkspaceSource } from './workspace-source'
@@ -1552,6 +1552,21 @@ export type LinearIssue = {
   updatedAt: string
 }
 
+// Why: a single default-assignment rule for the Task board. A Linear issue is
+// matched by any provided field (team key, project name, label - all
+// case-insensitive); the first matching rule's repoSelector becomes the task's
+// dispatch target at ingest. Empty fields are wildcards.
+export type TaskBoardLinearProjectRule = {
+  /** Match the issue's Linear team key (e.g. "ENG"). */
+  teamKey?: string
+  /** Match the issue's Linear project name. */
+  projectName?: string
+  /** Match if the issue carries this label. */
+  label?: string
+  /** Repo selector to assign (e.g. `id:<repoId>` or `name:widget`). */
+  repoSelector: string
+}
+
 export type LinearProjectSummary = {
   id: string
   workspaceId?: string
@@ -2774,6 +2789,19 @@ export type GlobalSettings = {
    *  configuration surface and edge cases (conflicts with existing paths,
    *  cleanup on worktree delete) are still being worked out. */
   experimentalWorktreeSymlinks: boolean
+
+  /** Perch Conductor harness (`fm conduct serve --harness`). Only implemented
+   *  harnesses can be selected; default claude. */
+  conductorHarness?: ConductorHarnessId
+
+  /** Which Linear issues the Task board auto-syncs. Maps to a Linear list
+   *  filter; default `assigned` (assigned-to-me). */
+  taskBoardLinearScope?: 'assigned' | 'created' | 'open' | 'all'
+
+  /** Default project (repo) assignment rules for the Task board. Applied at
+   *  Linear ingest to a pre-dispatch, unassigned task: the first matching rule
+   *  sets the task's dispatch target so drag-to-dispatch never prompts. */
+  taskBoardLinearProjectMap?: TaskBoardLinearProjectRule[]
 
   /** Active non-local runtime environment for client-routed RPC. `null`
    *  preserves the current local desktop behavior. */

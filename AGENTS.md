@@ -53,12 +53,19 @@ It provides the `fm` binary (entry: `firstmate/bin/fm.js`) and the `conduct` sub
 The conduct layer lives in `firstmate/src/conduct/`:
 - `frames.ts` - shared `ConductFrame` union type (`TextFrame | ToolFrame | DoneFrame | SessionFrame | ErrorFrame`)
 - `adapter.ts` - the `HarnessAdapter` type (use `type`, not `interface`, per oxlint)
-- `adapters/claude.ts` - the reference Claude adapter; spawns `claude` with stream-json flags and parses `stream_event` / `system` / `result` lines into frames
+- `adapters/claude.ts` - the reference Claude adapter; spawns `claude` with stream-json flags and parses `stream_event` / `system` / `result` lines into frames; supports persistent multi-turn sessions for `conduct serve`
 - `adapters/{cursor,codex,opencode,pi}.ts` - stubs (throw `'not implemented'`)
-- `index.ts` - arg parsing and dispatch for `fm conduct`
+- `run-conduct.ts` - one-shot harness dispatch (`fm conduct "<prompt>"`)
+- `serve-conduct.ts` - long-lived multi-turn server (`fm conduct serve --format ndjson`)
+- `conduct-command.ts` - `conduct` and `conduct serve` subcommands (Commander)
+- `index.ts` - re-exports conduct command registration, `runConduct`, and `serveConduct`
+- `src/index.ts` - root `fm` CLI entry (Commander program, `--help`, `--version`)
+
+**Perch Conductor integration:** Orca's `PerchService` (`src/main/perch/perch-service.ts`) spawns `node firstmate/bin/fm.js conduct serve --format ndjson` instead of talking to `claude` directly. Plain-text user turns go to stdin; stdout is one NDJSON `ConductFrame` per line. Build firstmate before running Conductor in dev: `pnpm --filter @orca/firstmate build`. Harness selection: Settings → Experimental → Conductor harness (`GlobalSettings.conductorHarness`, default `claude`).
 
 The adapter tests use a fake claude fixture at `firstmate/src/conduct/fixtures/fake-claude.mjs`.
 Override the command in tests via `new ClaudeAdapter({ command: 'node', args: [FAKE_CLAUDE] })`.
+Serve tests use `fake-claude-serve.mjs` or `FM_CONDUCT_CLAUDE_COMMAND` / `FM_CONDUCT_CLAUDE_ARGS` env vars.
 
 The package has its own `tsconfig.json` (NodeNext ESM), `vitest.config.ts`, and `package.json`.
 Run `pnpm --filter @orca/firstmate typecheck` / `test` for isolated checks.

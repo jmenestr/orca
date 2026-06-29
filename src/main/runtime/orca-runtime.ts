@@ -40,6 +40,15 @@ import { homedir } from 'os'
 import { isAbsolute, join, resolve } from 'path'
 import { mkdir, readFile, readdir, rm, stat } from 'fs/promises'
 import { OrchestrationDb } from './orchestration/db'
+import { PerchDb } from '../perch/perch-db'
+import { PerchConductorBridge } from '../perch/perch-conductor-bridge'
+import { PerchFleetService } from '../perch/perch-fleet-service'
+import { writeBackTaskStatusToLinear } from '../perch/perch-linear-writeback'
+import { resolveFloatingTerminalCwd } from '../ipc/floating-workspace-directory'
+import { PerchTaskSyncService } from '../perch/perch-task-sync'
+import { PerchService, type PerchConductorFrame } from '../perch/perch-service'
+import type { Task } from '../perch/perch-types'
+import { normalizeConductorHarnessId } from '../../shared/conductor-harness'
 import { formatMessagesForInjection } from './orchestration/formatter'
 import type {
   Automation,
@@ -58,8 +67,6 @@ import type {
   GitHubPrStartPoint,
   GitPushTarget,
   GitWorktreeInfo,
-  GitHubCreateIssueFields,
-  GitHubOwnerRepo,
   GlobalSettings,
   PersistedUIState,
   Project,
@@ -86,15 +93,6 @@ import type {
   WorktreeBaseStatusEvent,
   WorktreeRemoteBranchConflictEvent,
   WorktreeStartupLaunch,
-  LinearCustomViewModel,
-  JiraConnectArgs,
-  JiraCreateIssueArgs,
-  JiraIssueFilter,
-  JiraIssueUpdate,
-  JiraSiteSelection,
-  LinearIssueUpdate,
-  LinearProjectSummary,
-  LinearWorkspaceSelection,
   NestedRepoScanResult,
   ProjectGroup,
   FolderWorkspace,
@@ -107,6 +105,7 @@ import type {
   TerminalPaneLayoutNode,
   TerminalTab,
   TuiAgent,
+  TaskBoardLinearProjectRule,
   WorkspaceCreateTelemetrySource,
   WorkspaceSessionState,
   DirEntry
@@ -114,31 +113,6 @@ import type {
 import type { SleepingAgentLaunchConfig } from '../../shared/agent-session-resume'
 import type { RuntimeClientEvent } from '../../shared/runtime-client-events'
 import { toRuntimeActivateWorktreeEvent } from '../../shared/runtime-client-events'
-import type {
-  LinearCurrentIssueContextHints,
-  LinearAttachResult,
-  LinearCommentAddResult,
-  LinearCreateResult,
-  LinearErrorCode,
-  LinearIssueListFilter,
-  LinearIssueListResult,
-  LinearProjectListResult,
-  LinearIssueSummary,
-  LinearIssueRequest,
-  LinearIssueTaskUpdateRequest,
-  LinearIssueTaskUpdateResult,
-  LinearTeamLabelsResult,
-  LinearTeamListResult,
-  LinearTeamMembersResult,
-  LinearTeamStatesResult,
-  LinearStatusSetResult
-} from '../../shared/linear-agent-access'
-import {
-  LINEAR_SEARCH_MAX_LIMIT,
-  LINEAR_WRITE_BODY_CAP,
-  clampLinearSearchLimit
-} from '../../shared/linear-agent-access'
-import { isLinearUuid } from '../../shared/linear-uuid'
 import type { FeatureInteractionId } from '../../shared/feature-interactions'
 import type { TerminalPaneSplitSource } from '../../shared/feature-education-telemetry'
 import {
@@ -151,7 +125,6 @@ import {
   getProjectHostSetupWorktreeMeta
 } from '../../shared/project-host-setup-projection'
 import { parsePtySessionId } from '../../shared/pty-session-id-format'
-import { clampLinearIssueListLimit } from '../../shared/linear-issue-read-limits'
 import { isFolderRepo } from '../../shared/repo-kind'
 import { DEFAULT_WORKSPACE_STATUS_ID } from '../../shared/workspace-statuses'
 import { buildSetupRunnerCommand } from '../../shared/setup-runner-command'
@@ -287,6 +260,9 @@ import { serveSimStateWatcher } from '../emulator/serve-sim-state-watcher'
 import type { EmulatorBridge } from '../emulator/emulator-bridge'
 import { RuntimeFileCommands } from './orca-runtime-files'
 import { RuntimeGitCommands } from './orca-runtime-git'
+import { RuntimeHostedReviewCommands } from './orca-runtime-hosted-review'
+import { RuntimeJiraCommands } from './orca-runtime-jira'
+import { RuntimeLinearCommands } from './orca-runtime-linear'
 import { ClaudeAgentTeamsService } from './claude-agent-teams-service'
 import type {
   AgentTeamsTmuxCompatRequest,
@@ -308,100 +284,17 @@ import { BrowserWindow, ipcMain } from 'electron'
 import type { AgentBrowserBridge } from '../browser/agent-browser-bridge'
 import type { BrowserBackend } from '../browser/browser-backend'
 import { BrowserError } from '../browser/cdp-bridge'
-import {
-  getPRForBranch,
-  getRepoSlug,
-  getRepoUpstream,
-  getWorkItem,
-  listIssues as listGitHubIssues,
-  listWorkItems,
-  countWorkItems,
-  getPRChecks,
-  getPRCheckDetails,
-  rerunPRChecks,
-  getPRComments,
-  getIssue,
-  resolveReviewThread,
-  setPRFileViewed,
-  getWorkItemByOwnerRepo,
-  updatePRTitle,
-  updatePRDetails,
-  mergePR,
-  setPRAutoMerge,
-  updatePRState,
-  requestPRReviewers,
-  removePRReviewers,
-  createIssue,
-  updateIssue,
-  addIssueComment,
-  addPRReviewComment,
-  addPRReviewCommentReply,
-  listLabels,
-  listAssignableUsers
-} from '../github/client'
-import type { GitHubPRBranchLookupOptions } from '../github/client'
+import { getPRForBranch, getRepoUpstream } from '../github/client'
 import { resolveGitHubPrStartPoint } from '../github/pr-start-point'
 import { fetchPrHeadTrackingRef } from '../github/pr-head-tracking-ref'
-import { getWorkItemDetails, getPRFileContents } from '../github/work-item-details'
-import { getRateLimit } from '../github/rate-limit'
-import {
-  closeMR as closeGitLabMR,
-  createIssue as createGitLabIssue,
-  diagnoseAuth as diagnoseGitLabAuthClient,
-  getJobTrace as getGitLabJobTrace,
-  getProjectRefForRemote as getGitLabProjectRefForRemote,
-  getRateLimit as getGitLabRateLimit,
-  getWorkItemByProjectRef as getGitLabWorkItemByProjectRef,
-  addIssueComment as addGitLabIssueComment,
-  addMRInlineComment as addGitLabMRInlineComment,
-  addMRComment as addGitLabMRComment,
-  listTodos as listGitLabTodos,
-  listIssues as listGitLabIssues,
-  listLabels as listGitLabLabels,
-  listMergeRequests as listGitLabMergeRequests,
-  listWorkItems as listGitLabWorkItems,
-  mergeMR as mergeGitLabMR,
-  reopenMR as reopenGitLabMR,
-  resolveMRDiscussion as resolveGitLabMRDiscussion,
-  retryJob as retryGitLabJob,
-  updateMR as updateGitLabMR,
-  updateMRReviewers as updateGitLabMRReviewers,
-  updateIssue as updateGitLabIssue
-} from '../gitlab/client'
 import { getGlabKnownHosts } from '../gitlab/gl-utils'
-import { getWorkItemDetails as getGitLabWorkItemDetails } from '../gitlab/work-item-details'
 import {
-  normalizeGitLabIssueListArgs,
-  normalizeGitLabMRListState,
-  normalizeGitLabPositiveInteger,
-  type GitLabIssueListState
-} from '../gitlab/gitlab-preload-args'
-import { recordGitLabProjectRecent } from '../gitlab/gitlab-project-recents'
-import type {
-  GitHubIssueUpdate,
-  GitHubPullRequestStateUpdate,
-  GitHubPRFile,
-  GitHubPRReviewCommentInput,
-  GitLabIssueUpdate,
-  GitLabMRInlineCommentInput,
-  GitLabProjectRef,
-  GitLabWorkItem,
-  MRListState
-} from '../../shared/types'
-import { inspectSetupScriptImportCandidates } from '../../shared/setup-script-imports'
-import type {
-  CreateHostedReviewInput,
-  CreateHostedReviewResult,
-  HostedReviewCreationEligibility,
-  HostedReviewCreationEligibilityArgs,
-  HostedReviewInfo
-} from '../../shared/hosted-review'
+  getProjectRefForRemote as getGitLabProjectRefForRemote,
+  getWorkItemByProjectRef as getGitLabWorkItemByProjectRef
+} from '../gitlab/client'
 import { getHostedReviewForBranch as getHostedReviewForBranchFromRepo } from '../source-control/hosted-review'
 import type { ForgeProviderId } from '../source-control/forge-provider'
-import {
-  createHostedReview as createHostedReviewFromRepo,
-  getHostedReviewCreationEligibility as getHostedReviewCreationEligibilityFromRepo
-} from '../source-control/hosted-review-creation'
+import { inspectSetupScriptImportCandidates } from '../../shared/setup-script-imports'
 import {
   getLocalProjectGitExecOptions,
   getLocalProjectWorktreeGitOptions,
@@ -417,128 +310,6 @@ import {
   pruneStaleLocalWorktreeRegistrationAfterFilesystemRemoval,
   recoverLocalWindowsLongPathWorktreeRemoval
 } from '../local-worktree-removal-recovery'
-import {
-  connect as connectLinear,
-  disconnect as disconnectLinear,
-  getStatus as getLinearStatus,
-  isAuthError as isLinearAuthError,
-  selectWorkspace as selectLinearWorkspace,
-  testConnection as testLinearConnection
-} from '../linear/client'
-import {
-  addIssueComment as addLinearIssueComment,
-  addIssueCommentForAgent as addLinearIssueCommentForAgent,
-  createIssueAttachment as createLinearIssueAttachment,
-  createIssueForAgent as createLinearIssueForAgent,
-  createIssue as createLinearIssue,
-  getAttachmentByUuidForAgent as getLinearAttachmentByUuidForAgent,
-  getCommentByUuidForAgent as getLinearCommentByUuidForAgent,
-  getIssue as getLinearIssue,
-  getIssueByUuidForAgent as getLinearIssueByUuidForAgent,
-  getIssueCommentThreadRoot as getLinearIssueCommentThreadRoot,
-  getIssueComments as getLinearIssueComments,
-  listIssues as listLinearIssues,
-  searchIssues as searchLinearIssues,
-  updateIssueForAgent as updateLinearIssueForAgent,
-  updateIssue as updateLinearIssue,
-  LinearWriteFailure,
-  type LinearListFilter
-} from '../linear/issues'
-import {
-  LinearAgentAccessError,
-  getLinearCurrentIssueFromWorktree,
-  readLinearIssueContext,
-  resolveLegacyLinearLinkWorkspace,
-  searchLinearIssuesForAgents
-} from '../linear/issue-context'
-import {
-  classifyLinearError,
-  linearError,
-  linearMessage,
-  sanitizeLinearErrorMessage
-} from '../linear/issue-context-errors'
-import {
-  createProject as createLinearProject,
-  getCustomView as getLinearCustomView,
-  getProject as getLinearProject,
-  listCustomViewIssues as listLinearCustomViewIssues,
-  listCustomViewProjects as listLinearCustomViewProjects,
-  listCustomViews as listLinearCustomViews,
-  listProjectsByExactName as listLinearProjectsByExactName,
-  listProjectIssues as listLinearProjectIssues,
-  listProjectTeams as listLinearProjectTeams,
-  listProjects as listLinearProjects,
-  type LinearProjectCreateInput
-} from '../linear/projects'
-import {
-  getTeamLabels as getLinearTeamLabels,
-  getTeamLabelsOrThrow as getLinearTeamLabelsOrThrow,
-  getTeamMembers as getLinearTeamMembers,
-  getTeamMembersOrThrow as getLinearTeamMembersOrThrow,
-  getTeamStates as getLinearTeamStates,
-  getTeamStatesOrThrow as getLinearTeamStatesOrThrow,
-  getViewerForWorkspaceOrThrow as getLinearViewerForWorkspaceOrThrow,
-  listTeamsForAgent as listLinearTeamsForAgent,
-  listTeams as listLinearTeams,
-  listTeamsOrThrow as listLinearTeamsOrThrow
-} from '../linear/teams'
-import {
-  connect as connectJira,
-  disconnect as disconnectJira,
-  getStatus as getJiraStatus,
-  selectSite as selectJiraSite,
-  testConnection as testJiraConnection
-} from '../jira/client'
-import {
-  addIssueComment as addJiraIssueComment,
-  createIssue as createJiraIssue,
-  getIssue as getJiraIssue,
-  getIssueComments as getJiraIssueComments,
-  listAssignableUsers as listJiraAssignableUsers,
-  listCreateFields as listJiraCreateFields,
-  listIssueTypes as listJiraIssueTypes,
-  listIssues as listJiraIssues,
-  listPriorities as listJiraPriorities,
-  listProjects as listJiraProjects,
-  listTransitions as listJiraTransitions,
-  searchIssues as searchJiraIssues,
-  updateIssue as updateJiraIssue
-} from '../jira/issues'
-import {
-  clearProjectItemFieldValue,
-  getProjectViewTable,
-  getWorkItemDetailsBySlug,
-  listAccessibleProjects,
-  listProjectViews,
-  resolveProjectRef,
-  addIssueCommentBySlug,
-  deleteIssueCommentBySlug,
-  listAssignableUsersBySlug,
-  listIssueTypesBySlug,
-  listLabelsBySlug,
-  updateIssueCommentBySlug,
-  updateIssueBySlug,
-  updateIssueTypeBySlug,
-  updateProjectItemFieldValue,
-  updatePullRequestBySlug
-} from '../github/project-view'
-import type {
-  ClearProjectItemFieldArgs,
-  GetProjectViewTableArgs,
-  ListAssignableUsersBySlugArgs,
-  ListIssueTypesBySlugArgs,
-  ListLabelsBySlugArgs,
-  ListProjectViewsArgs,
-  ProjectWorkItemDetailsBySlugArgs,
-  ResolveProjectRefArgs,
-  AddIssueCommentBySlugArgs,
-  DeleteIssueCommentBySlugArgs,
-  UpdateIssueBySlugArgs,
-  UpdateIssueCommentBySlugArgs,
-  UpdateIssueTypeBySlugArgs,
-  UpdateProjectItemFieldArgs,
-  UpdatePullRequestBySlugArgs
-} from '../../shared/github-project-types'
 import {
   getGitUsername,
   getBaseRefDefault,
@@ -1145,6 +916,12 @@ type RuntimeNotifier = {
   // input. See docs/mobile-presence-lock.md.
   terminalDriverChanged(ptyId: string, driver: DriverState): void
   browserDriverChanged?(browserPageId: string, driver: RuntimeBrowserDriverState): void
+  // Why: pushes a Perch conductor stream-json frame to the renderer over the
+  // 'perch:changed' channel; the desktop Conductor view consumes it live.
+  perchChanged?(frame: PerchConductorFrame): void
+  // Why: pushes Task updates (with the current Run embedded) to the renderer
+  // fleet strip and Activity enrichments.
+  perchWorkChanged?(task: Task): void
 }
 
 type TerminalHandleRecord = {
@@ -1597,43 +1374,6 @@ type ResolvedWorktree = Worktree & {
   git: GitWorktreeInfo
 }
 
-type LinearAgentWriteTarget = {
-  issue: LinearIssueSummary
-  workspaceId: string
-}
-
-type LinearCreateFieldIntent = {
-  stateId?: string
-  assigneeId?: string | null
-  priority?: number
-  estimate?: number | null
-  dueDate?: string | null
-  labelIds?: string[]
-  projectId?: string
-}
-
-function sameStringSet(left: string[], right: string[]): boolean {
-  if (left.length !== right.length) {
-    return false
-  }
-  const rightSet = new Set(right)
-  return left.every((value) => rightSet.has(value))
-}
-
-function labelsForIds(
-  ids: string[],
-  labels: { id?: string | null; name?: string | null; color?: string | null }[]
-): { id: string; name: string; color?: string | null }[] {
-  return ids.map((id) => {
-    const label = labels.find((candidate) => candidate.id === id)
-    return {
-      id,
-      name: label?.name ?? id,
-      ...(label?.color ? { color: label.color } : {})
-    }
-  })
-}
-
 type TerminalWorkspaceLaunchScope = {
   id: string
   path: string
@@ -1826,6 +1566,11 @@ export class OrcaRuntimeService {
   private cloneInFlightByPath = new Map<string, Promise<void>>()
   private agentDetector: AgentDetector | null = null
   private _orchestrationDb: OrchestrationDb | null = null
+  private _perchDb: PerchDb | null = null
+  private _perchService: PerchService | null = null
+  private _perchFleetService: PerchFleetService | null = null
+  private _perchConductorBridge: PerchConductorBridge | null = null
+  private _perchTaskSyncService: PerchTaskSyncService | null = null
   private messageWaitersByHandle = new Map<string, Set<MessageWaiter>>()
   // Why: mobile clients subscribe to terminal output via terminal.subscribe.
   // These listeners fire on every onPtyData call, enabling real-time streaming
@@ -2455,6 +2200,115 @@ export class OrcaRuntimeService {
 
   setOrchestrationDb(db: OrchestrationDb): void {
     this._orchestrationDb = db
+  }
+
+  // Why: lazily own the single Perch conductor service (its own perch.db, kept
+  // entirely separate from orchestration.db). Mirrors getOrchestrationDb. On
+  // first construction we fan every conductor frame out to the renderer push
+  // bus (notifier.perchChanged) and register a quit hook so the long-lived
+  // conductor subprocess is killed when the app exits.
+  private getOrCreatePerchDb(): PerchDb {
+    if (!this._perchDb) {
+      const { app } = require('electron')
+      this._perchDb = new PerchDb(join(app.getPath('userData'), 'perch.db'))
+    }
+    return this._perchDb
+  }
+
+  getPerchService(): PerchService {
+    const harness = normalizeConductorHarnessId(this.store?.getSettings()?.conductorHarness)
+
+    if (this._perchService && this._perchService.harness !== harness) {
+      this._perchService.kill()
+      this._perchService = null
+    }
+
+    if (!this._perchService) {
+      const db = this.getOrCreatePerchDb()
+      const service = new PerchService({ db, harness })
+      service.subscribe((frame) => this.notifier?.perchChanged?.(frame))
+      // Why: attach the conductor bridge so dispatch/list tools reach Orca main
+      // through the Orca-native spawn path (Phase C).
+      service.setConductorBridge(this.getPerchConductorBridge())
+      const { app } = require('electron')
+      app.on('before-quit', () => service.kill())
+      this._perchService = service
+    }
+    return this._perchService
+  }
+
+  getPerchConductorBridge(): PerchConductorBridge {
+    if (!this._perchConductorBridge) {
+      const bridge = new PerchConductorBridge({
+        getRuntime: () => this,
+        getFleet: () => this.getPerchFleetService()
+      })
+      const { app } = require('electron')
+      app.on('before-quit', () => bridge.close())
+      this._perchConductorBridge = bridge
+    }
+    return this._perchConductorBridge
+  }
+
+  getPerchFleetService(): PerchFleetService {
+    if (!this._perchFleetService) {
+      const fleet = new PerchFleetService({
+        db: this.getOrCreatePerchDb(),
+        getPerchService: () => this.getPerchService(),
+        getRuntime: () => this,
+        onWorkChanged: (item) => this.notifier?.perchWorkChanged?.(item),
+        writeBackLinearStatus: (externalId, status) =>
+          writeBackTaskStatusToLinear(externalId, status)
+      })
+      fleet.startSupervisor()
+      this._perchFleetService = fleet
+    }
+    return this._perchFleetService
+  }
+
+  // Why: lets tests inject a PerchService backed by a fake conductor + in-memory
+  // PerchDb without touching the filesystem or spawning claude. Mirrors
+  // setOrchestrationDb.
+  setPerchService(service: PerchService): void {
+    this._perchService = service
+    service.subscribe((frame) => this.notifier?.perchChanged?.(frame))
+  }
+
+  setPerchFleetService(service: PerchFleetService): void {
+    this._perchFleetService = service
+  }
+
+  // Why: read-only Linear -> Task ingest for the Task board. Pushes upserted
+  // tasks to the renderer over the same perch:workChanged bus as the fleet.
+  getPerchTaskSyncService(): PerchTaskSyncService {
+    if (!this._perchTaskSyncService) {
+      const sync = new PerchTaskSyncService({
+        db: this.getOrCreatePerchDb(),
+        // Why: cast through the runtime settings object — the store's settings
+        // type lags GlobalSettings here (same as conductorHarness above), but
+        // the field is present at runtime.
+        getScope: () => {
+          const settings = this.store?.getSettings() as
+            | { taskBoardLinearScope?: 'assigned' | 'created' | 'open' | 'all' }
+            | undefined
+          return settings?.taskBoardLinearScope ?? 'assigned'
+        },
+        getProjectMap: () => {
+          const settings = this.store?.getSettings() as
+            | { taskBoardLinearProjectMap?: TaskBoardLinearProjectRule[] }
+            | undefined
+          return settings?.taskBoardLinearProjectMap ?? []
+        },
+        onTaskChanged: (task) => this.notifier?.perchWorkChanged?.(task)
+      })
+      sync.start()
+      this._perchTaskSyncService = sync
+    }
+    return this._perchTaskSyncService
+  }
+
+  setPerchTaskSyncService(service: PerchTaskSyncService): void {
+    this._perchTaskSyncService = service
   }
 
   setAutomationService(service: AutomationService): void {
@@ -10015,35 +9869,170 @@ export class OrcaRuntimeService {
     }
   }
 
-  private async resolveHostedReviewTarget(args: {
-    repoSelector: string
-    worktreeSelector?: string
-  }): Promise<{ repo: Repo; repoPath: string }> {
-    const repo = await this.resolveRepoSelector(args.repoSelector)
-    if (!args.worktreeSelector) {
-      return { repo, repoPath: repo.path }
-    }
-
-    const worktree = await this.resolveWorktreeSelector(args.worktreeSelector)
-    if (worktree.repoId !== repo.id) {
-      throw new Error('Access denied: worktree does not belong to repository')
-    }
-    return { repo, repoPath: worktree.path }
-  }
+  private readonly hostedReviewCommands = new RuntimeHostedReviewCommands({
+    resolveRepoSelector: (selector) => this.resolveRepoSelector(selector),
+    resolveWorktreeSelector: (selector) => this.resolveWorktreeSelector(selector),
+    requireStore: () => this.requireStore(),
+    getStore: () => this.store as Store | null,
+    getStats: () => this.stats ?? undefined
+  })
 
   private getHostedReviewExecutionOptions(
     repo: Repo
-  ): { localGitExecOptions: { wslDistro?: string } } | undefined {
-    const localGitOptions = this.getLocalGitExecutionOptionArgs(repo)[0] ?? {}
-    return Object.keys(localGitOptions).length > 0
-      ? { localGitExecOptions: localGitOptions }
-      : undefined
+  ): ReturnType<RuntimeHostedReviewCommands['getHostedReviewExecutionOptions']> {
+    return this.hostedReviewCommands.getHostedReviewExecutionOptions(repo)
   }
 
-  private getLocalGitExecutionOptionArgs(repo: Repo): [] | [{ wslDistro?: string }] {
-    const localGitOptions = getLocalProjectWorktreeGitOptions(this.requireStore(), repo)
-    return Object.keys(localGitOptions).length > 0 ? [localGitOptions] : []
+  private getLocalGitExecutionOptionArgs(
+    repo: Repo
+  ): ReturnType<RuntimeHostedReviewCommands['getLocalGitExecutionOptionArgs']> {
+    return this.hostedReviewCommands.getLocalGitExecutionOptionArgs(repo)
   }
+
+  getRepoSlug: RuntimeHostedReviewCommands['getRepoSlug'] =
+    this.hostedReviewCommands.getRepoSlug.bind(this.hostedReviewCommands)
+  getRepoUpstream: RuntimeHostedReviewCommands['getRepoUpstream'] =
+    this.hostedReviewCommands.getRepoUpstream.bind(this.hostedReviewCommands)
+  listRepoWorkItems: RuntimeHostedReviewCommands['listRepoWorkItems'] =
+    this.hostedReviewCommands.listRepoWorkItems.bind(this.hostedReviewCommands)
+  listRepoIssues: RuntimeHostedReviewCommands['listRepoIssues'] =
+    this.hostedReviewCommands.listRepoIssues.bind(this.hostedReviewCommands)
+  getRepoWorkItem: RuntimeHostedReviewCommands['getRepoWorkItem'] =
+    this.hostedReviewCommands.getRepoWorkItem.bind(this.hostedReviewCommands)
+  getRepoWorkItemByOwnerRepo: RuntimeHostedReviewCommands['getRepoWorkItemByOwnerRepo'] =
+    this.hostedReviewCommands.getRepoWorkItemByOwnerRepo.bind(this.hostedReviewCommands)
+  getRepoWorkItemDetails: RuntimeHostedReviewCommands['getRepoWorkItemDetails'] =
+    this.hostedReviewCommands.getRepoWorkItemDetails.bind(this.hostedReviewCommands)
+  countRepoWorkItems: RuntimeHostedReviewCommands['countRepoWorkItems'] =
+    this.hostedReviewCommands.countRepoWorkItems.bind(this.hostedReviewCommands)
+  listRepoLabels: RuntimeHostedReviewCommands['listRepoLabels'] =
+    this.hostedReviewCommands.listRepoLabels.bind(this.hostedReviewCommands)
+  listRepoAssignableUsers: RuntimeHostedReviewCommands['listRepoAssignableUsers'] =
+    this.hostedReviewCommands.listRepoAssignableUsers.bind(this.hostedReviewCommands)
+  getGitHubRateLimit: RuntimeHostedReviewCommands['getGitHubRateLimit'] =
+    this.hostedReviewCommands.getGitHubRateLimit.bind(this.hostedReviewCommands)
+  getRepoPRForBranch: RuntimeHostedReviewCommands['getRepoPRForBranch'] =
+    this.hostedReviewCommands.getRepoPRForBranch.bind(this.hostedReviewCommands)
+  getHostedReviewForBranch: RuntimeHostedReviewCommands['getHostedReviewForBranch'] =
+    this.hostedReviewCommands.getHostedReviewForBranch.bind(this.hostedReviewCommands)
+  getHostedReviewCreationEligibility: RuntimeHostedReviewCommands['getHostedReviewCreationEligibility'] =
+    this.hostedReviewCommands.getHostedReviewCreationEligibility.bind(this.hostedReviewCommands)
+  createHostedReview: RuntimeHostedReviewCommands['createHostedReview'] =
+    this.hostedReviewCommands.createHostedReview.bind(this.hostedReviewCommands)
+  listGitLabRepoWorkItems: RuntimeHostedReviewCommands['listGitLabRepoWorkItems'] =
+    this.hostedReviewCommands.listGitLabRepoWorkItems.bind(this.hostedReviewCommands)
+  listGitLabRepoMRs: RuntimeHostedReviewCommands['listGitLabRepoMRs'] =
+    this.hostedReviewCommands.listGitLabRepoMRs.bind(this.hostedReviewCommands)
+  listGitLabRepoIssues: RuntimeHostedReviewCommands['listGitLabRepoIssues'] =
+    this.hostedReviewCommands.listGitLabRepoIssues.bind(this.hostedReviewCommands)
+  listGitLabRepoTodos: RuntimeHostedReviewCommands['listGitLabRepoTodos'] =
+    this.hostedReviewCommands.listGitLabRepoTodos.bind(this.hostedReviewCommands)
+  diagnoseGitLabAuth: RuntimeHostedReviewCommands['diagnoseGitLabAuth'] =
+    this.hostedReviewCommands.diagnoseGitLabAuth.bind(this.hostedReviewCommands)
+  getGitLabRateLimit: RuntimeHostedReviewCommands['getGitLabRateLimit'] =
+    this.hostedReviewCommands.getGitLabRateLimit.bind(this.hostedReviewCommands)
+  listGitLabRepoLabels: RuntimeHostedReviewCommands['listGitLabRepoLabels'] =
+    this.hostedReviewCommands.listGitLabRepoLabels.bind(this.hostedReviewCommands)
+  createGitLabRepoIssue: RuntimeHostedReviewCommands['createGitLabRepoIssue'] =
+    this.hostedReviewCommands.createGitLabRepoIssue.bind(this.hostedReviewCommands)
+  updateGitLabRepoIssue: RuntimeHostedReviewCommands['updateGitLabRepoIssue'] =
+    this.hostedReviewCommands.updateGitLabRepoIssue.bind(this.hostedReviewCommands)
+  addGitLabRepoIssueComment: RuntimeHostedReviewCommands['addGitLabRepoIssueComment'] =
+    this.hostedReviewCommands.addGitLabRepoIssueComment.bind(this.hostedReviewCommands)
+  addGitLabRepoMRComment: RuntimeHostedReviewCommands['addGitLabRepoMRComment'] =
+    this.hostedReviewCommands.addGitLabRepoMRComment.bind(this.hostedReviewCommands)
+  addGitLabRepoMRInlineComment: RuntimeHostedReviewCommands['addGitLabRepoMRInlineComment'] =
+    this.hostedReviewCommands.addGitLabRepoMRInlineComment.bind(this.hostedReviewCommands)
+  resolveGitLabRepoMRDiscussion: RuntimeHostedReviewCommands['resolveGitLabRepoMRDiscussion'] =
+    this.hostedReviewCommands.resolveGitLabRepoMRDiscussion.bind(this.hostedReviewCommands)
+  getGitLabRepoJobTrace: RuntimeHostedReviewCommands['getGitLabRepoJobTrace'] =
+    this.hostedReviewCommands.getGitLabRepoJobTrace.bind(this.hostedReviewCommands)
+  retryGitLabRepoJob: RuntimeHostedReviewCommands['retryGitLabRepoJob'] =
+    this.hostedReviewCommands.retryGitLabRepoJob.bind(this.hostedReviewCommands)
+  mergeGitLabRepoMR: RuntimeHostedReviewCommands['mergeGitLabRepoMR'] =
+    this.hostedReviewCommands.mergeGitLabRepoMR.bind(this.hostedReviewCommands)
+  updateGitLabRepoMRState: RuntimeHostedReviewCommands['updateGitLabRepoMRState'] =
+    this.hostedReviewCommands.updateGitLabRepoMRState.bind(this.hostedReviewCommands)
+  updateGitLabRepoMR: RuntimeHostedReviewCommands['updateGitLabRepoMR'] =
+    this.hostedReviewCommands.updateGitLabRepoMR.bind(this.hostedReviewCommands)
+  updateGitLabRepoMRReviewers: RuntimeHostedReviewCommands['updateGitLabRepoMRReviewers'] =
+    this.hostedReviewCommands.updateGitLabRepoMRReviewers.bind(this.hostedReviewCommands)
+  getGitLabRepoWorkItemDetails: RuntimeHostedReviewCommands['getGitLabRepoWorkItemDetails'] =
+    this.hostedReviewCommands.getGitLabRepoWorkItemDetails.bind(this.hostedReviewCommands)
+  getGitLabRepoWorkItemByPath: RuntimeHostedReviewCommands['getGitLabRepoWorkItemByPath'] =
+    this.hostedReviewCommands.getGitLabRepoWorkItemByPath.bind(this.hostedReviewCommands)
+  getRepoIssue: RuntimeHostedReviewCommands['getRepoIssue'] =
+    this.hostedReviewCommands.getRepoIssue.bind(this.hostedReviewCommands)
+  getRepoPRChecks: RuntimeHostedReviewCommands['getRepoPRChecks'] =
+    this.hostedReviewCommands.getRepoPRChecks.bind(this.hostedReviewCommands)
+  rerunRepoPRChecks: RuntimeHostedReviewCommands['rerunRepoPRChecks'] =
+    this.hostedReviewCommands.rerunRepoPRChecks.bind(this.hostedReviewCommands)
+  getRepoPRCheckDetails: RuntimeHostedReviewCommands['getRepoPRCheckDetails'] =
+    this.hostedReviewCommands.getRepoPRCheckDetails.bind(this.hostedReviewCommands)
+  getRepoPRComments: RuntimeHostedReviewCommands['getRepoPRComments'] =
+    this.hostedReviewCommands.getRepoPRComments.bind(this.hostedReviewCommands)
+  getRepoPRFileContents: RuntimeHostedReviewCommands['getRepoPRFileContents'] =
+    this.hostedReviewCommands.getRepoPRFileContents.bind(this.hostedReviewCommands)
+  resolveRepoReviewThread: RuntimeHostedReviewCommands['resolveRepoReviewThread'] =
+    this.hostedReviewCommands.resolveRepoReviewThread.bind(this.hostedReviewCommands)
+  setRepoPRFileViewed: RuntimeHostedReviewCommands['setRepoPRFileViewed'] =
+    this.hostedReviewCommands.setRepoPRFileViewed.bind(this.hostedReviewCommands)
+  updateRepoPRTitle: RuntimeHostedReviewCommands['updateRepoPRTitle'] =
+    this.hostedReviewCommands.updateRepoPRTitle.bind(this.hostedReviewCommands)
+  updateRepoPRDetails: RuntimeHostedReviewCommands['updateRepoPRDetails'] =
+    this.hostedReviewCommands.updateRepoPRDetails.bind(this.hostedReviewCommands)
+  mergeRepoPR: RuntimeHostedReviewCommands['mergeRepoPR'] =
+    this.hostedReviewCommands.mergeRepoPR.bind(this.hostedReviewCommands)
+  setRepoPRAutoMerge: RuntimeHostedReviewCommands['setRepoPRAutoMerge'] =
+    this.hostedReviewCommands.setRepoPRAutoMerge.bind(this.hostedReviewCommands)
+  updateRepoPRState: RuntimeHostedReviewCommands['updateRepoPRState'] =
+    this.hostedReviewCommands.updateRepoPRState.bind(this.hostedReviewCommands)
+  requestRepoPRReviewers: RuntimeHostedReviewCommands['requestRepoPRReviewers'] =
+    this.hostedReviewCommands.requestRepoPRReviewers.bind(this.hostedReviewCommands)
+  removeRepoPRReviewers: RuntimeHostedReviewCommands['removeRepoPRReviewers'] =
+    this.hostedReviewCommands.removeRepoPRReviewers.bind(this.hostedReviewCommands)
+  createRepoIssue: RuntimeHostedReviewCommands['createRepoIssue'] =
+    this.hostedReviewCommands.createRepoIssue.bind(this.hostedReviewCommands)
+  updateRepoIssue: RuntimeHostedReviewCommands['updateRepoIssue'] =
+    this.hostedReviewCommands.updateRepoIssue.bind(this.hostedReviewCommands)
+  addRepoIssueComment: RuntimeHostedReviewCommands['addRepoIssueComment'] =
+    this.hostedReviewCommands.addRepoIssueComment.bind(this.hostedReviewCommands)
+  addRepoPRReviewComment: RuntimeHostedReviewCommands['addRepoPRReviewComment'] =
+    this.hostedReviewCommands.addRepoPRReviewComment.bind(this.hostedReviewCommands)
+  addRepoPRReviewCommentReply: RuntimeHostedReviewCommands['addRepoPRReviewCommentReply'] =
+    this.hostedReviewCommands.addRepoPRReviewCommentReply.bind(this.hostedReviewCommands)
+  listGitHubProjects: RuntimeHostedReviewCommands['listGitHubProjects'] =
+    this.hostedReviewCommands.listGitHubProjects.bind(this.hostedReviewCommands)
+  listGitHubLabelsBySlug: RuntimeHostedReviewCommands['listGitHubLabelsBySlug'] =
+    this.hostedReviewCommands.listGitHubLabelsBySlug.bind(this.hostedReviewCommands)
+  listGitHubAssignableUsersBySlug: RuntimeHostedReviewCommands['listGitHubAssignableUsersBySlug'] =
+    this.hostedReviewCommands.listGitHubAssignableUsersBySlug.bind(this.hostedReviewCommands)
+  listGitHubIssueTypesBySlug: RuntimeHostedReviewCommands['listGitHubIssueTypesBySlug'] =
+    this.hostedReviewCommands.listGitHubIssueTypesBySlug.bind(this.hostedReviewCommands)
+  resolveGitHubProjectRef: RuntimeHostedReviewCommands['resolveGitHubProjectRef'] =
+    this.hostedReviewCommands.resolveGitHubProjectRef.bind(this.hostedReviewCommands)
+  listGitHubProjectViews: RuntimeHostedReviewCommands['listGitHubProjectViews'] =
+    this.hostedReviewCommands.listGitHubProjectViews.bind(this.hostedReviewCommands)
+  getGitHubProjectViewTable: RuntimeHostedReviewCommands['getGitHubProjectViewTable'] =
+    this.hostedReviewCommands.getGitHubProjectViewTable.bind(this.hostedReviewCommands)
+  getGitHubProjectWorkItemDetailsBySlug: RuntimeHostedReviewCommands['getGitHubProjectWorkItemDetailsBySlug'] =
+    this.hostedReviewCommands.getGitHubProjectWorkItemDetailsBySlug.bind(this.hostedReviewCommands)
+  updateGitHubProjectItemField: RuntimeHostedReviewCommands['updateGitHubProjectItemField'] =
+    this.hostedReviewCommands.updateGitHubProjectItemField.bind(this.hostedReviewCommands)
+  clearGitHubProjectItemField: RuntimeHostedReviewCommands['clearGitHubProjectItemField'] =
+    this.hostedReviewCommands.clearGitHubProjectItemField.bind(this.hostedReviewCommands)
+  updateGitHubIssueBySlug: RuntimeHostedReviewCommands['updateGitHubIssueBySlug'] =
+    this.hostedReviewCommands.updateGitHubIssueBySlug.bind(this.hostedReviewCommands)
+  updateGitHubPullRequestBySlug: RuntimeHostedReviewCommands['updateGitHubPullRequestBySlug'] =
+    this.hostedReviewCommands.updateGitHubPullRequestBySlug.bind(this.hostedReviewCommands)
+  updateGitHubIssueTypeBySlug: RuntimeHostedReviewCommands['updateGitHubIssueTypeBySlug'] =
+    this.hostedReviewCommands.updateGitHubIssueTypeBySlug.bind(this.hostedReviewCommands)
+  addGitHubIssueCommentBySlug: RuntimeHostedReviewCommands['addGitHubIssueCommentBySlug'] =
+    this.hostedReviewCommands.addGitHubIssueCommentBySlug.bind(this.hostedReviewCommands)
+  updateGitHubIssueCommentBySlug: RuntimeHostedReviewCommands['updateGitHubIssueCommentBySlug'] =
+    this.hostedReviewCommands.updateGitHubIssueCommentBySlug.bind(this.hostedReviewCommands)
+  deleteGitHubIssueCommentBySlug: RuntimeHostedReviewCommands['deleteGitHubIssueCommentBySlug'] =
+    this.hostedReviewCommands.deleteGitHubIssueCommentBySlug.bind(this.hostedReviewCommands)
 
   private getAgentLaunchPlatformForRepo(repo: Repo): NodeJS.Platform {
     const projectRuntime = repo.connectionId
@@ -10060,22 +10049,6 @@ export class OrcaRuntimeService {
       return isWindowsAbsolutePathLike(scope.path) ? 'win32' : 'linux'
     }
     return isWslUncPath(scope.path) ? 'linux' : process.platform
-  }
-
-  async getRepoSlug(repoSelector: string): Promise<{ owner: string; repo: string } | null> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    const options = this.getHostedReviewExecutionOptions(repo)
-    return options
-      ? getRepoSlug(repo.path, repo.connectionId ?? null, options)
-      : getRepoSlug(repo.path, repo.connectionId ?? null)
-  }
-
-  async getRepoUpstream(repoSelector: string): Promise<{ owner: string; repo: string } | null> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    const options = this.getHostedReviewExecutionOptions(repo)
-    return options
-      ? getRepoUpstream(repo.path, repo.connectionId ?? null, options)
-      : getRepoUpstream(repo.path, repo.connectionId ?? null)
   }
 
   // Why: repos added before fork detection existed have no stored `upstream`, so
@@ -10111,1060 +10084,6 @@ export class OrcaRuntimeService {
     } catch {
       // Best-effort startup backfill; never disrupt launch.
     }
-  }
-
-  async listRepoWorkItems(
-    repoSelector: string,
-    limit?: number,
-    query?: string,
-    before?: string,
-    noCache?: boolean
-  ): Promise<Awaited<ReturnType<typeof listWorkItems>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return listWorkItems(
-      repo.path,
-      limit,
-      query,
-      before,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      noCache,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async listRepoIssues(
-    repoSelector: string,
-    limit?: number
-  ): Promise<Awaited<ReturnType<typeof listGitHubIssues>>['items']> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    const result = await listGitHubIssues(
-      repo.path,
-      limit,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-    return result.items
-  }
-
-  async getRepoWorkItem(
-    repoSelector: string,
-    number: number,
-    type?: 'issue' | 'pr'
-  ): Promise<Awaited<ReturnType<typeof getWorkItem>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return getWorkItem(
-      repo.path,
-      number,
-      type,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async getRepoWorkItemByOwnerRepo(
-    repoSelector: string,
-    ownerRepo: { owner: string; repo: string },
-    number: number,
-    type: 'issue' | 'pr'
-  ): Promise<Awaited<ReturnType<typeof getWorkItemByOwnerRepo>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return getWorkItemByOwnerRepo(
-      repo.path,
-      ownerRepo,
-      number,
-      type,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async getRepoWorkItemDetails(
-    repoSelector: string,
-    number: number,
-    type?: 'issue' | 'pr'
-  ): Promise<Awaited<ReturnType<typeof getWorkItemDetails>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return getWorkItemDetails(
-      repo.path,
-      number,
-      type,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async countRepoWorkItems(repoSelector: string, query?: string): Promise<number> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return countWorkItems(
-      repo.path,
-      query,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async listRepoLabels(repoSelector: string): Promise<Awaited<ReturnType<typeof listLabels>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return listLabels(
-      repo.path,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async listRepoAssignableUsers(
-    repoSelector: string
-  ): Promise<Awaited<ReturnType<typeof listAssignableUsers>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return listAssignableUsers(
-      repo.path,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  getGitHubRateLimit(options?: {
-    force?: boolean
-  }): Promise<Awaited<ReturnType<typeof getRateLimit>>> {
-    return getRateLimit(options)
-  }
-
-  async getRepoPRForBranch(
-    repoSelector: string,
-    branch: string,
-    linkedPRNumber?: number | null,
-    fallbackPRNumber?: number | null,
-    acceptMergedFallbackPR?: boolean
-  ): Promise<Awaited<ReturnType<typeof getPRForBranch>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    const options: GitHubPRBranchLookupOptions = this.getHostedReviewExecutionOptions(repo) ?? {}
-    const lookupOptions = { ...options }
-    if (acceptMergedFallbackPR === true) {
-      lookupOptions.acceptMergedFallbackPR = true
-    }
-    const lookupOptionArgs: [] | [GitHubPRBranchLookupOptions] =
-      Object.keys(lookupOptions).length > 0 ? [lookupOptions] : []
-    return getPRForBranch(
-      repo.path,
-      branch,
-      linkedPRNumber ?? null,
-      repo.connectionId ?? null,
-      linkedPRNumber == null ? (fallbackPRNumber ?? null) : null,
-      ...lookupOptionArgs
-    )
-  }
-
-  async getHostedReviewForBranch(args: {
-    repoSelector: string
-    branch: string
-    linkedGitHubPR?: number | null
-    fallbackGitHubPR?: number | null
-    linkedGitLabMR?: number | null
-    linkedBitbucketPR?: number | null
-    linkedAzureDevOpsPR?: number | null
-    linkedGiteaPR?: number | null
-  }): Promise<HostedReviewInfo | null> {
-    const repo = await this.resolveRepoSelector(args.repoSelector)
-    const executionOptions = this.getHostedReviewExecutionOptions(repo)
-    const review = await getHostedReviewForBranchFromRepo({
-      repoPath: repo.path,
-      connectionId: repo.connectionId ?? null,
-      branch: args.branch,
-      linkedGitHubPR: args.linkedGitHubPR ?? null,
-      fallbackGitHubPR: args.linkedGitHubPR == null ? (args.fallbackGitHubPR ?? null) : null,
-      linkedGitLabMR: args.linkedGitLabMR ?? null,
-      linkedBitbucketPR: args.linkedBitbucketPR ?? null,
-      linkedAzureDevOpsPR: args.linkedAzureDevOpsPR ?? null,
-      linkedGiteaPR: args.linkedGiteaPR ?? null,
-      ...executionOptions
-    })
-    if (review?.provider === 'github' && this.stats && !this.stats.hasCountedPR(review.url)) {
-      this.stats.record({
-        type: 'pr_created',
-        at: Date.now(),
-        repoId: repo.id,
-        meta: { prNumber: review.number, prUrl: review.url }
-      })
-    }
-    return review
-  }
-
-  async getHostedReviewCreationEligibility(
-    args: Omit<HostedReviewCreationEligibilityArgs, 'repoPath'> & {
-      repoSelector: string
-      worktreeSelector?: string
-    }
-  ): Promise<HostedReviewCreationEligibility> {
-    const { repo, repoPath } = await this.resolveHostedReviewTarget(args)
-    const executionOptions = this.getHostedReviewExecutionOptions(repo)
-    return getHostedReviewCreationEligibilityFromRepo({
-      repoPath,
-      connectionId: repo.connectionId ?? null,
-      branch: args.branch,
-      base: args.base ?? null,
-      hasUncommittedChanges: args.hasUncommittedChanges,
-      hasUpstream: args.hasUpstream,
-      ahead: args.ahead,
-      behind: args.behind,
-      linkedGitHubPR: args.linkedGitHubPR ?? null,
-      fallbackGitHubPR: args.linkedGitHubPR == null ? (args.fallbackGitHubPR ?? null) : null,
-      linkedGitLabMR: args.linkedGitLabMR ?? null,
-      linkedBitbucketPR: args.linkedBitbucketPR ?? null,
-      linkedAzureDevOpsPR: args.linkedAzureDevOpsPR ?? null,
-      linkedGiteaPR: args.linkedGiteaPR ?? null,
-      ...executionOptions
-    })
-  }
-
-  async createHostedReview(
-    args: CreateHostedReviewInput & { repoSelector: string; worktreeSelector?: string }
-  ): Promise<CreateHostedReviewResult> {
-    const { repo, repoPath } = await this.resolveHostedReviewTarget(args)
-    const executionOptions = this.getHostedReviewExecutionOptions(repo)
-    const input = {
-      provider: args.provider,
-      base: args.base,
-      head: args.head,
-      title: args.title,
-      body: args.body,
-      draft: args.draft,
-      ...(args.useTemplate !== undefined ? { useTemplate: args.useTemplate } : {})
-    }
-    const result = executionOptions
-      ? await createHostedReviewFromRepo(
-          repoPath,
-          input,
-          repo.connectionId ?? null,
-          executionOptions
-        )
-      : await createHostedReviewFromRepo(repoPath, input, repo.connectionId ?? null)
-    if (result.ok && this.stats && !this.stats.hasCountedPR(result.url)) {
-      this.stats.record({
-        type: 'pr_created',
-        at: Date.now(),
-        repoId: repo.id,
-        meta: { prNumber: result.number, prUrl: result.url }
-      })
-    }
-    return result
-  }
-
-  async listGitLabRepoWorkItems(
-    repoSelector: string,
-    state?: MRListState,
-    page?: number,
-    perPage?: number,
-    query?: string
-  ): Promise<Awaited<ReturnType<typeof listGitLabWorkItems>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return listGitLabWorkItems(
-      repo.path,
-      state ?? 'opened',
-      page ?? 1,
-      perPage ?? 20,
-      repo.issueSourcePreference,
-      query,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async listGitLabRepoMRs(
-    repoSelector: string,
-    state?: MRListState,
-    page?: number,
-    perPage?: number,
-    query?: string
-  ): Promise<Awaited<ReturnType<typeof listGitLabMergeRequests>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return listGitLabMergeRequests(
-      repo.path,
-      normalizeGitLabMRListState(state),
-      normalizeGitLabPositiveInteger(page, 1, 10_000),
-      normalizeGitLabPositiveInteger(perPage, 20, 100),
-      repo.issueSourcePreference,
-      query,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async listGitLabRepoIssues(
-    repoSelector: string,
-    state?: GitLabIssueListState,
-    assignee?: string,
-    limit?: number
-  ): Promise<{
-    items: GitLabWorkItem[]
-    error?: Awaited<ReturnType<typeof listGitLabIssues>>['error']
-  }> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    const normalized = normalizeGitLabIssueListArgs({ state, assignee, limit })
-    const result = await listGitLabIssues(
-      repo.path,
-      normalized.limit,
-      repo.issueSourcePreference,
-      normalized.state,
-      normalized.assignee,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-    // Why: web runtime mirrors the desktop preload contract, where GitLab
-    // issue rows share the GitLabWorkItem shape with MRs on TaskPage.
-    const items: GitLabWorkItem[] = result.items.map((issue) => ({
-      id: `gitlab-issue-${repo.id}-${issue.number}`,
-      type: 'issue' as const,
-      number: issue.number,
-      title: issue.title,
-      state: issue.state,
-      url: issue.url,
-      labels: issue.labels,
-      updatedAt: issue.updatedAt ?? '',
-      author: issue.author ?? null,
-      repoId: repo.id
-    }))
-    return { items, ...(result.error ? { error: result.error } : {}) }
-  }
-
-  async listGitLabRepoTodos(
-    repoSelector: string
-  ): Promise<Awaited<ReturnType<typeof listGitLabTodos>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return listGitLabTodos(
-      repo.path,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async diagnoseGitLabAuth(): Promise<Awaited<ReturnType<typeof diagnoseGitLabAuthClient>>> {
-    return diagnoseGitLabAuthClient()
-  }
-
-  async getGitLabRateLimit(options?: {
-    force?: boolean
-    host?: string | null
-  }): Promise<Awaited<ReturnType<typeof getGitLabRateLimit>>> {
-    return getGitLabRateLimit(options)
-  }
-
-  async listGitLabRepoLabels(
-    repoSelector: string
-  ): Promise<Awaited<ReturnType<typeof listGitLabLabels>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return listGitLabLabels(
-      repo.path,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async createGitLabRepoIssue(
-    repoSelector: string,
-    title: string,
-    body: string
-  ): Promise<Awaited<ReturnType<typeof createGitLabIssue>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return createGitLabIssue(
-      repo.path,
-      title,
-      body,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async updateGitLabRepoIssue(
-    repoSelector: string,
-    number: number,
-    updates: GitLabIssueUpdate,
-    projectRef?: GitLabProjectRef | null
-  ): Promise<Awaited<ReturnType<typeof updateGitLabIssue>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return updateGitLabIssue(
-      repo.path,
-      number,
-      updates,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      projectRef,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async addGitLabRepoIssueComment(
-    repoSelector: string,
-    number: number,
-    body: string,
-    projectRef?: GitLabProjectRef | null
-  ): Promise<Awaited<ReturnType<typeof addGitLabIssueComment>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return addGitLabIssueComment(
-      repo.path,
-      number,
-      body,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      projectRef,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async addGitLabRepoMRComment(
-    repoSelector: string,
-    iid: number,
-    body: string,
-    projectRef?: GitLabProjectRef | null
-  ): Promise<Awaited<ReturnType<typeof addGitLabMRComment>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return addGitLabMRComment(
-      repo.path,
-      iid,
-      body,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      projectRef,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async addGitLabRepoMRInlineComment(
-    repoSelector: string,
-    iid: number,
-    input: GitLabMRInlineCommentInput,
-    projectRef?: GitLabProjectRef | null
-  ): Promise<Awaited<ReturnType<typeof addGitLabMRInlineComment>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return addGitLabMRInlineComment(
-      repo.path,
-      iid,
-      input,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      projectRef,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async resolveGitLabRepoMRDiscussion(
-    repoSelector: string,
-    iid: number,
-    discussionId: string,
-    resolved: boolean,
-    projectRef?: GitLabProjectRef | null
-  ): Promise<Awaited<ReturnType<typeof resolveGitLabMRDiscussion>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return resolveGitLabMRDiscussion(
-      repo.path,
-      iid,
-      discussionId,
-      resolved,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      projectRef,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async getGitLabRepoJobTrace(
-    repoSelector: string,
-    jobId: number,
-    projectRef?: GitLabProjectRef | null
-  ): Promise<Awaited<ReturnType<typeof getGitLabJobTrace>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return getGitLabJobTrace(
-      repo.path,
-      jobId,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      projectRef,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async retryGitLabRepoJob(
-    repoSelector: string,
-    jobId: number,
-    projectRef?: GitLabProjectRef | null
-  ): Promise<Awaited<ReturnType<typeof retryGitLabJob>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return retryGitLabJob(
-      repo.path,
-      jobId,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      projectRef,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async mergeGitLabRepoMR(
-    repoSelector: string,
-    iid: number,
-    method?: 'merge' | 'squash' | 'rebase',
-    projectRef?: GitLabProjectRef | null
-  ): Promise<Awaited<ReturnType<typeof mergeGitLabMR>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return mergeGitLabMR(
-      repo.path,
-      iid,
-      method ?? 'merge',
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      projectRef,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async updateGitLabRepoMRState(
-    repoSelector: string,
-    iid: number,
-    state: 'opened' | 'closed',
-    projectRef?: GitLabProjectRef | null
-  ): Promise<Awaited<ReturnType<typeof closeGitLabMR>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return state === 'closed'
-      ? closeGitLabMR(
-          repo.path,
-          iid,
-          repo.issueSourcePreference,
-          repo.connectionId ?? null,
-          projectRef,
-          ...this.getLocalGitExecutionOptionArgs(repo)
-        )
-      : reopenGitLabMR(
-          repo.path,
-          iid,
-          repo.issueSourcePreference,
-          repo.connectionId ?? null,
-          projectRef,
-          ...this.getLocalGitExecutionOptionArgs(repo)
-        )
-  }
-
-  async updateGitLabRepoMR(
-    repoSelector: string,
-    iid: number,
-    updates: { title?: string; body?: string; addLabels?: string[]; removeLabels?: string[] },
-    projectRef?: GitLabProjectRef | null
-  ): Promise<Awaited<ReturnType<typeof updateGitLabMR>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return updateGitLabMR(
-      repo.path,
-      iid,
-      updates,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      projectRef,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async updateGitLabRepoMRReviewers(
-    repoSelector: string,
-    iid: number,
-    reviewerIds: number[],
-    projectRef?: GitLabProjectRef | null
-  ): Promise<Awaited<ReturnType<typeof updateGitLabMRReviewers>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return updateGitLabMRReviewers(
-      repo.path,
-      iid,
-      reviewerIds,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      projectRef,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async getGitLabRepoWorkItemDetails(
-    repoSelector: string,
-    iid: number,
-    type: 'issue' | 'mr',
-    projectRef?: GitLabProjectRef | null
-  ): Promise<Awaited<ReturnType<typeof getGitLabWorkItemDetails>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return getGitLabWorkItemDetails(
-      repo.path,
-      iid,
-      type,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      projectRef,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async getGitLabRepoWorkItemByPath(
-    repoSelector: string,
-    projectRef: GitLabProjectRef,
-    iid: number,
-    type: 'issue' | 'mr'
-  ): Promise<Awaited<ReturnType<typeof getGitLabWorkItemByProjectRef>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    const result = await getGitLabWorkItemByProjectRef(
-      repo.path,
-      projectRef,
-      iid,
-      type,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-    // Why: remote pasted-URL lookups should update GitLab recents exactly
-    // like the desktop IPC path, but only after a successful lookup.
-    if (result && this.store?.updateSettings) {
-      const store = this.store
-      recordGitLabProjectRecent(
-        {
-          getSettings: () => store.getSettings(),
-          updateSettings: (updates) => store.updateSettings?.(updates)
-        },
-        projectRef.host,
-        projectRef.path
-      )
-    }
-    return result
-  }
-
-  async getRepoIssue(
-    repoSelector: string,
-    number: number
-  ): Promise<Awaited<ReturnType<typeof getIssue>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return getIssue(
-      repo.path,
-      number,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async getRepoPRChecks(
-    repoSelector: string,
-    prNumber: number,
-    headSha?: string,
-    prRepo?: GitHubOwnerRepo | null,
-    options?: { noCache?: boolean }
-  ): Promise<Awaited<ReturnType<typeof getPRChecks>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return getPRChecks(
-      repo.path,
-      prNumber,
-      headSha,
-      prRepo ?? null,
-      options,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async rerunRepoPRChecks(
-    repoSelector: string,
-    prNumber: number,
-    options?: { headSha?: string; failedOnly?: boolean }
-  ): Promise<Awaited<ReturnType<typeof rerunPRChecks>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return rerunPRChecks(
-      repo.path,
-      prNumber,
-      options,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async getRepoPRCheckDetails(
-    repoSelector: string,
-    args: {
-      checkRunId?: number
-      workflowRunId?: number
-      checkName?: string
-      url?: string | null
-      prRepo?: GitHubOwnerRepo | null
-    }
-  ): Promise<Awaited<ReturnType<typeof getPRCheckDetails>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return getPRCheckDetails(
-      repo.path,
-      { ...args, prRepo: args.prRepo ?? null },
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async getRepoPRComments(
-    repoSelector: string,
-    prNumber: number,
-    prRepo?: GitHubOwnerRepo | null,
-    options?: { noCache?: boolean }
-  ): Promise<Awaited<ReturnType<typeof getPRComments>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return getPRComments(
-      repo.path,
-      prNumber,
-      { ...options, prRepo: prRepo ?? null },
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async getRepoPRFileContents(
-    repoSelector: string,
-    args: {
-      prNumber: number
-      path: string
-      oldPath?: string
-      status: GitHubPRFile['status']
-      headSha: string
-      baseSha: string
-    }
-  ): Promise<Awaited<ReturnType<typeof getPRFileContents>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return getPRFileContents({
-      repoPath: repo.path,
-      connectionId: repo.connectionId ?? null,
-      localGitOptions: this.getLocalGitExecutionOptionArgs(repo)[0],
-      ...args
-    })
-  }
-
-  async resolveRepoReviewThread(
-    repoSelector: string,
-    threadId: string,
-    resolve: boolean
-  ): Promise<Awaited<ReturnType<typeof resolveReviewThread>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return resolveReviewThread(
-      repo.path,
-      threadId,
-      resolve,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async setRepoPRFileViewed(
-    repoSelector: string,
-    args: {
-      pullRequestId: string
-      path: string
-      viewed: boolean
-    }
-  ): Promise<Awaited<ReturnType<typeof setPRFileViewed>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return setPRFileViewed({
-      repoPath: repo.path,
-      connectionId: repo.connectionId ?? null,
-      localGitOptions: this.getLocalGitExecutionOptionArgs(repo)[0],
-      ...args
-    })
-  }
-
-  async updateRepoPRTitle(
-    repoSelector: string,
-    prNumber: number,
-    title: string,
-    prRepo?: GitHubOwnerRepo | null
-  ): Promise<Awaited<ReturnType<typeof updatePRTitle>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return updatePRTitle(
-      repo.path,
-      prNumber,
-      title,
-      repo.connectionId ?? null,
-      prRepo ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async updateRepoPRDetails(
-    repoSelector: string,
-    prNumber: number,
-    updates: { title?: string; body?: string },
-    prRepo?: GitHubOwnerRepo | null
-  ): Promise<Awaited<ReturnType<typeof updatePRDetails>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return updatePRDetails(
-      repo.path,
-      prNumber,
-      updates,
-      repo.connectionId ?? null,
-      prRepo ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async mergeRepoPR(
-    repoSelector: string,
-    prNumber: number,
-    method?: 'merge' | 'squash' | 'rebase',
-    prRepo?: GitHubOwnerRepo | null
-  ): Promise<Awaited<ReturnType<typeof mergePR>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return mergePR(
-      repo.path,
-      prNumber,
-      method,
-      repo.connectionId ?? null,
-      prRepo ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async setRepoPRAutoMerge(
-    repoSelector: string,
-    prNumber: number,
-    enabled: boolean,
-    method?: 'merge' | 'squash' | 'rebase',
-    prRepo?: GitHubOwnerRepo | null
-  ): Promise<Awaited<ReturnType<typeof setPRAutoMerge>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return setPRAutoMerge(
-      repo.path,
-      prNumber,
-      enabled,
-      method,
-      repo.connectionId ?? null,
-      prRepo ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async updateRepoPRState(
-    repoSelector: string,
-    prNumber: number,
-    updates: GitHubPullRequestStateUpdate
-  ): Promise<Awaited<ReturnType<typeof updatePRState>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return updatePRState(
-      repo.path,
-      prNumber,
-      updates,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async requestRepoPRReviewers(
-    repoSelector: string,
-    prNumber: number,
-    reviewers: string[]
-  ): Promise<Awaited<ReturnType<typeof requestPRReviewers>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return requestPRReviewers(
-      repo.path,
-      prNumber,
-      reviewers,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async removeRepoPRReviewers(
-    repoSelector: string,
-    prNumber: number,
-    reviewers: string[]
-  ): Promise<Awaited<ReturnType<typeof removePRReviewers>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return removePRReviewers(
-      repo.path,
-      prNumber,
-      reviewers,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async createRepoIssue(
-    repoSelector: string,
-    title: string,
-    body: string,
-    fields?: GitHubCreateIssueFields
-  ): Promise<Awaited<ReturnType<typeof createIssue>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return createIssue(
-      repo.path,
-      title,
-      body,
-      repo.issueSourcePreference,
-      repo.connectionId ?? null,
-      fields,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async updateRepoIssue(
-    repoSelector: string,
-    number: number,
-    updates: GitHubIssueUpdate
-  ): Promise<Awaited<ReturnType<typeof updateIssue>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return updateIssue(
-      repo.path,
-      number,
-      updates,
-      repo.connectionId ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async addRepoIssueComment(
-    repoSelector: string,
-    number: number,
-    body: string,
-    prRepo?: GitHubOwnerRepo | null
-  ): Promise<Awaited<ReturnType<typeof addIssueComment>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return addIssueComment(
-      repo.path,
-      number,
-      body,
-      repo.connectionId ?? null,
-      prRepo ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async addRepoPRReviewComment(
-    repoSelector: string,
-    args: Omit<GitHubPRReviewCommentInput, 'repoPath'>
-  ): Promise<Awaited<ReturnType<typeof addPRReviewComment>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return addPRReviewComment({
-      repoPath: repo.path,
-      connectionId: repo.connectionId ?? null,
-      localGitOptions: this.getLocalGitExecutionOptionArgs(repo)[0],
-      ...args
-    })
-  }
-
-  async addRepoPRReviewCommentReply(
-    repoSelector: string,
-    args: {
-      prNumber: number
-      commentId: number
-      body: string
-      threadId?: string
-      path?: string
-      line?: number
-      prRepo?: GitHubOwnerRepo | null
-    }
-  ): Promise<Awaited<ReturnType<typeof addPRReviewCommentReply>>> {
-    const repo = await this.resolveRepoSelector(repoSelector)
-    return addPRReviewCommentReply(
-      repo.path,
-      args.prNumber,
-      args.commentId,
-      args.body,
-      args.threadId,
-      args.path,
-      args.line,
-      repo.connectionId ?? null,
-      args.prRepo ?? null,
-      ...this.getLocalGitExecutionOptionArgs(repo)
-    )
-  }
-
-  async listGitHubProjects(): Promise<Awaited<ReturnType<typeof listAccessibleProjects>>> {
-    return listAccessibleProjects()
-  }
-
-  async listGitHubLabelsBySlug(
-    args: ListLabelsBySlugArgs
-  ): Promise<Awaited<ReturnType<typeof listLabelsBySlug>>> {
-    return listLabelsBySlug(args)
-  }
-
-  async listGitHubAssignableUsersBySlug(
-    args: ListAssignableUsersBySlugArgs
-  ): Promise<Awaited<ReturnType<typeof listAssignableUsersBySlug>>> {
-    return listAssignableUsersBySlug(args)
-  }
-
-  async listGitHubIssueTypesBySlug(
-    args: ListIssueTypesBySlugArgs
-  ): Promise<Awaited<ReturnType<typeof listIssueTypesBySlug>>> {
-    return listIssueTypesBySlug(args)
-  }
-
-  async resolveGitHubProjectRef(
-    args: ResolveProjectRefArgs
-  ): Promise<Awaited<ReturnType<typeof resolveProjectRef>>> {
-    return resolveProjectRef(args)
-  }
-
-  async listGitHubProjectViews(
-    args: ListProjectViewsArgs
-  ): Promise<Awaited<ReturnType<typeof listProjectViews>>> {
-    return listProjectViews(args)
-  }
-
-  async getGitHubProjectViewTable(
-    args: GetProjectViewTableArgs
-  ): Promise<Awaited<ReturnType<typeof getProjectViewTable>>> {
-    return getProjectViewTable(args)
-  }
-
-  async getGitHubProjectWorkItemDetailsBySlug(
-    args: ProjectWorkItemDetailsBySlugArgs
-  ): Promise<Awaited<ReturnType<typeof getWorkItemDetailsBySlug>>> {
-    return getWorkItemDetailsBySlug(args)
-  }
-
-  async updateGitHubProjectItemField(
-    args: UpdateProjectItemFieldArgs
-  ): Promise<Awaited<ReturnType<typeof updateProjectItemFieldValue>>> {
-    return updateProjectItemFieldValue(args)
-  }
-
-  async clearGitHubProjectItemField(
-    args: ClearProjectItemFieldArgs
-  ): Promise<Awaited<ReturnType<typeof clearProjectItemFieldValue>>> {
-    return clearProjectItemFieldValue(args)
-  }
-
-  async updateGitHubIssueBySlug(
-    args: UpdateIssueBySlugArgs
-  ): Promise<Awaited<ReturnType<typeof updateIssueBySlug>>> {
-    return updateIssueBySlug(args)
-  }
-
-  async updateGitHubPullRequestBySlug(
-    args: UpdatePullRequestBySlugArgs
-  ): Promise<Awaited<ReturnType<typeof updatePullRequestBySlug>>> {
-    return updatePullRequestBySlug(args)
-  }
-
-  async updateGitHubIssueTypeBySlug(
-    args: UpdateIssueTypeBySlugArgs
-  ): Promise<Awaited<ReturnType<typeof updateIssueTypeBySlug>>> {
-    return updateIssueTypeBySlug(args)
-  }
-
-  async addGitHubIssueCommentBySlug(
-    args: AddIssueCommentBySlugArgs
-  ): Promise<Awaited<ReturnType<typeof addIssueCommentBySlug>>> {
-    return addIssueCommentBySlug(args)
-  }
-
-  async updateGitHubIssueCommentBySlug(
-    args: UpdateIssueCommentBySlugArgs
-  ): Promise<Awaited<ReturnType<typeof updateIssueCommentBySlug>>> {
-    return updateIssueCommentBySlug(args)
-  }
-
-  async deleteGitHubIssueCommentBySlug(
-    args: DeleteIssueCommentBySlugArgs
-  ): Promise<Awaited<ReturnType<typeof deleteIssueCommentBySlug>>> {
-    return deleteIssueCommentBySlug(args)
   }
 
   private getSetupHookTrustPayload(
@@ -12072,6 +10991,12 @@ export class OrcaRuntimeService {
     startupDraft?: string
     startupDraftPaste?: WorktreeStartupDraftPaste
     lineage?: WorktreeLineageInput
+    /** Why: codespace/remote repos often have an unreachable origin from the
+     *  desktop. When the remote-tracking base refresh fails but the exact base
+     *  ref is already present locally, branch from that local ref instead of
+     *  hard-failing. Callers that need an up-to-date base (interactive create)
+     *  leave this off to keep the strict refresh gate. */
+    allowStaleBaseRefOnRefreshFailure?: boolean
   }): Promise<CreateWorktreeResult> {
     if (!this.store) {
       throw new Error('runtime_unavailable')
@@ -12414,11 +11339,20 @@ export class OrcaRuntimeService {
         ...localWorktreeGitOptionArgs
       )
       if (!refreshResult.ok) {
-        throw new Error(
-          `Could not refresh base ref "${baseBranch}" from "${remoteTrackingBase.remote}". Check your network and try again.`
+        // Why: branching only needs the base ref to exist locally, not to be
+        // fresh. When the caller tolerates a refresh miss (e.g. Perch dispatch
+        // into a codespace/remote repo with an unreachable origin) and the exact
+        // base ref is already present locally, fall back to it. Without a local
+        // copy there is nothing to branch from, so still fail.
+        if (!(args.allowStaleBaseRefOnRefreshFailure && hadLocalBaseRef)) {
+          throw new Error(
+            `Could not refresh base ref "${baseBranch}" from "${remoteTrackingBase.remote}". Check your network and try again.`
+          )
+        }
+        console.warn(
+          `[worktree-create] using stale local base ref "${remoteTrackingBase.base}" for ${repo.path}: origin refresh failed`
         )
-      }
-      if (
+      } else if (
         !hadLocalBaseRef &&
         !(await this.hasRemoteTrackingRef(
           repo.path,
@@ -14929,6 +13863,61 @@ export class OrcaRuntimeService {
     })
   }
 
+  // Why: launch an agent in the floating-terminal scope (no managed worktree) -
+  // the dispatch path for `scratch`-mode tasks. Unlike launchAgentTerminal this
+  // has no Repo, so it builds the startup via buildAgentStartupPlan directly and
+  // runs in the floating-workspace cwd resolved by resolveTerminalWorkspaceLaunchScope.
+  async launchScratchAgentTerminal(opts: {
+    agent: TuiAgent
+    prompt: string
+    title?: string
+    activate?: boolean
+  }): Promise<RuntimeTerminalCreate> {
+    if (!this.store) {
+      throw new Error('runtime_unavailable')
+    }
+    const workspace = await this.resolveTerminalWorkspaceLaunchScope(FLOATING_TERMINAL_WORKTREE_ID)
+    const settings = this.store.getSettings()
+    if (!isTuiAgentEnabled(opts.agent, settings.disabledTuiAgents)) {
+      throw new Error('Selected agent is disabled. Choose an enabled agent before creating.')
+    }
+    const platform = this.getAgentLaunchPlatformForWorkspace(workspace)
+    const startupPlan = buildAgentStartupPlan({
+      agent: opts.agent,
+      prompt: opts.prompt,
+      cmdOverrides: settings.agentCmdOverrides ?? {},
+      agentArgs: resolveTuiAgentLaunchArgs(opts.agent, settings.agentDefaultArgs),
+      agentEnv: resolveTuiAgentLaunchEnv(opts.agent, settings.agentDefaultEnv),
+      platform,
+      allowEmptyPromptLaunch: true
+    })
+    if (!startupPlan) {
+      throw new Error(`Could not build launch command for ${opts.agent}.`)
+    }
+    this.markLocalWorkspaceTrustedForAgent(opts.agent, workspace.path)
+    const terminal = await this.createTerminal(FLOATING_TERMINAL_WORKTREE_ID, {
+      command: startupPlan.launchCommand,
+      env: startupPlan.env,
+      ...(startupPlan.launchConfig ? { launchConfig: startupPlan.launchConfig } : {}),
+      launchAgent: opts.agent,
+      startupCommandDelivery: startupPlan.startupCommandDelivery,
+      title: opts.title,
+      // Why: background spawn so createTerminal returns a paneKey for the Run,
+      // then reveal it in the floating panel when activate is requested.
+      focus: false,
+      activate: opts.activate === true
+    })
+    // Why: some agents take the prompt on stdin after the process is ready
+    // rather than as a launch arg; deliver it once the agent is up.
+    if (startupPlan.followupPrompt) {
+      this.sendStartupFollowupWhenReady(terminal.handle, {
+        expectedProcess: startupPlan.expectedProcess,
+        prompt: startupPlan.followupPrompt
+      })
+    }
+    return terminal
+  }
+
   async createMobileSessionTerminal(
     worktreeSelector: string,
     opts: {
@@ -16033,9 +15022,25 @@ export class OrcaRuntimeService {
     if (floatingTerminalSelector) {
       // Why: the floating sentinel is terminal-only; other workspace APIs must
       // keep rejecting it because there is no backing repo/worktree record.
+      // Resolve the configured floating-workspace dir (falling back to the
+      // app-owned default) instead of homedir() so floating/scratch agents run
+      // in a real, writable workspace rather than the user's home.
+      // Why: the runtime store's settings type lags GlobalSettings (same as
+      // conductorHarness above), but floatingTerminalCwd is present at runtime.
+      const floatingSettings = this.store?.getSettings?.() as
+        | { floatingTerminalCwd?: string }
+        | undefined
+      const floatingConfiguredCwd =
+        typeof floatingSettings?.floatingTerminalCwd === 'string'
+          ? floatingSettings.floatingTerminalCwd
+          : undefined
+      const floatingCwd = await resolveFloatingTerminalCwd(
+        this.store as unknown as Pick<Store, 'getSettings'>,
+        { path: floatingConfiguredCwd, requireTrusted: true }
+      ).catch(() => homedir())
       return {
         id: FLOATING_TERMINAL_WORKTREE_ID,
-        path: homedir(),
+        path: floatingCwd,
         connectionId: null,
         repo: null,
         folderWorkspace: null
@@ -17774,6 +16779,10 @@ export class OrcaRuntimeService {
   getAgentStatusOrchestrationContextForPaneKey(
     paneKey: string
   ): AgentStatusOrchestrationContext | undefined {
+    const perchContext = this._perchFleetService?.getOrchestrationForPaneKey(paneKey)
+    if (perchContext) {
+      return perchContext
+    }
     const handle = this.getTerminalHandleForPaneKey(paneKey)
     if (!handle) {
       return undefined
@@ -18808,2079 +17817,140 @@ export class OrcaRuntimeService {
 
   // ── Linear integration ──
 
-  linearConnect(apiKey: string): ReturnType<typeof connectLinear> {
-    return connectLinear(apiKey)
-  }
-
-  linearDisconnect(workspaceId?: string): { ok: true } {
-    disconnectLinear(workspaceId)
-    return { ok: true }
-  }
-
-  linearSelectWorkspace(workspaceId: LinearWorkspaceSelection): ReturnType<typeof getLinearStatus> {
-    return selectLinearWorkspace(workspaceId)
-  }
-
-  linearStatus(): ReturnType<typeof getLinearStatus> {
-    return getLinearStatus()
-  }
-
-  linearTestConnection(workspaceId?: string): ReturnType<typeof testLinearConnection> {
-    return testLinearConnection(workspaceId)
-  }
-
-  linearSearchIssues(
-    query: string,
-    limit = 20,
-    workspaceId?: LinearWorkspaceSelection
-  ): ReturnType<typeof searchLinearIssues> {
-    return searchLinearIssues(query, Math.min(Math.max(1, limit), 50), workspaceId)
-  }
-
-  linearSearchForAgents(args: {
-    query: string
-    limit?: number
-    workspaceId?: string | 'all'
-  }): ReturnType<typeof searchLinearIssuesForAgents> {
-    return searchLinearIssuesForAgents(args)
-  }
-
-  linearIssueContext(request: LinearIssueRequest): ReturnType<typeof readLinearIssueContext> {
-    return readLinearIssueContext(request, (context) => this.linearResolveCurrentIssue(context))
-  }
-
-  async linearTeamListForAgents(params: {
-    workspaceId?: string | 'all'
-  }): Promise<LinearTeamListResult> {
-    try {
-      const result = await listLinearTeamsForAgent(params.workspaceId)
-      const workspaceErrors = result.errors.map((error) => ({
-        workspace: { id: error.workspaceId, name: error.workspaceName ?? error.workspaceId },
-        code: this.linearWorkspaceErrorCode(error.type),
-        message: sanitizeLinearErrorMessage(error.message)
-      }))
-      return {
-        teams: result.teams.map((team) => this.linearTeamSummary(team)),
-        meta: {
-          workspaceId: params.workspaceId,
-          returned: result.teams.length,
-          partial: workspaceErrors.length > 0,
-          workspaceErrors
-        }
-      }
-    } catch (error) {
-      throw this.mapLinearReadFailure(error)
-    }
-  }
-
-  async linearTeamMembersForAgents(params: {
-    teamInput: string
-    workspaceId?: string
-  }): Promise<LinearTeamMembersResult> {
-    const team = await this.resolveLinearTeamInput(params.teamInput, params.workspaceId)
-    try {
-      const members = await getLinearTeamMembersOrThrow(team.id, team.workspaceId)
-      return {
-        team: this.linearTeamSummary(team),
-        members: members.map((member) => ({
-          id: member.id,
-          displayName: member.displayName,
-          avatarUrl: member.avatarUrl
-        })),
-        meta: { workspaceId: team.workspaceId, returned: members.length }
-      }
-    } catch (error) {
-      throw this.mapLinearReadFailure(error)
-    }
-  }
-
-  async linearTeamStatesForAgents(params: {
-    teamInput: string
-    workspaceId?: string
-  }): Promise<LinearTeamStatesResult> {
-    const team = await this.resolveLinearTeamInput(params.teamInput, params.workspaceId)
-    const states = await this.getLinearTeamStatesForWrite(team.id, team.workspaceId)
-    return {
-      team: this.linearTeamSummary(team),
-      states: states.map((state) => ({
-        id: state.id,
-        name: state.name,
-        type: state.type,
-        color: state.color,
-        position: state.position
-      })),
-      meta: { workspaceId: team.workspaceId, returned: states.length }
-    }
-  }
-
-  async linearTeamLabelsForAgents(params: {
-    teamInput: string
-    workspaceId?: string
-  }): Promise<LinearTeamLabelsResult> {
-    const team = await this.resolveLinearTeamInput(params.teamInput, params.workspaceId)
-    const labels = await this.getLinearTeamLabelsForWrite(team.id, team.workspaceId)
-    return {
-      team: this.linearTeamSummary(team),
-      labels: labels.map((label) => ({ id: label.id, name: label.name, color: label.color })),
-      meta: { workspaceId: team.workspaceId, returned: labels.length }
-    }
-  }
-
-  async linearProjectListForAgents(params: {
-    query?: string
-    limit?: number
-    workspaceId?: string | 'all'
-  }): Promise<LinearProjectListResult> {
-    const limit = clampLinearSearchLimit(params.limit)
-    try {
-      const result = await this.linearListProjects(params.query, limit, params.workspaceId, true)
-      const projects = result.items.slice(0, limit).map((project) => ({
-        id: project.id,
-        name: project.name,
-        ...(project.url ? { url: project.url } : {}),
-        ...(project.workspaceId ? { workspaceId: project.workspaceId } : {}),
-        ...(project.workspaceName ? { workspaceName: project.workspaceName } : {}),
-        ...(project.teams ? { teams: project.teams } : {})
-      }))
-      const workspaceErrors = (result.errors ?? []).map((error) => ({
-        workspace: { id: error.workspaceId, name: error.workspaceName ?? error.workspaceId },
-        code: this.linearWorkspaceErrorCode(error.type),
-        message: sanitizeLinearErrorMessage(error.message)
-      }))
-      return {
-        projects,
-        meta: {
-          query: params.query,
-          workspaceId: params.workspaceId,
-          limit,
-          returned: projects.length,
-          hasMore: result.hasMore === true || result.items.length > limit,
-          partial: workspaceErrors.length > 0,
-          workspaceErrors
-        }
-      }
-    } catch (error) {
-      throw this.mapLinearReadFailure(error)
-    }
-  }
-
-  async linearIssueListForAgents(params: {
-    filter?: LinearIssueListFilter
-    teamInput?: string
-    limit?: number
-    workspaceId?: string | 'all'
-  }): Promise<LinearIssueListResult> {
-    const filter = params.filter ?? 'assigned'
-    const limit = clampLinearIssueListLimit(params.limit)
-    const team = params.teamInput
-      ? await this.resolveLinearTeamInput(params.teamInput, params.workspaceId)
-      : null
-    const workspaceId = team?.workspaceId ?? params.workspaceId
-    try {
-      const result = await listLinearIssues(filter, limit, workspaceId, team?.id)
-      return {
-        issues: result.items.map((issue) => ({
-          id: issue.id,
-          identifier: issue.identifier,
-          title: issue.title,
-          url: issue.url,
-          state: issue.state,
-          team: issue.team,
-          project: issue.project ?? null,
-          assignee: issue.assignee ?? null,
-          priority: issue.priority,
-          estimate: issue.estimate,
-          dueDate: issue.dueDate,
-          updatedAt: issue.updatedAt,
-          workspace: {
-            id: issue.workspaceId ?? workspaceId ?? '',
-            name: issue.workspaceName ?? issue.workspaceId ?? workspaceId ?? ''
-          }
-        })),
-        meta: {
-          filter,
-          workspaceId,
-          ...(team ? { team: this.linearTeamSummary(team) } : {}),
-          limit,
-          returned: result.items.length,
-          hasMore: result.hasMore === true,
-          partial: (result.errors?.length ?? 0) > 0,
-          workspaceErrors: (result.errors ?? []).map((error) => ({
-            workspace: { id: error.workspaceId, name: error.workspaceName ?? error.workspaceId },
-            code: this.linearWorkspaceErrorCode(error.type),
-            message: sanitizeLinearErrorMessage(error.message)
-          }))
-        }
-      }
-    } catch (error) {
-      throw this.mapLinearReadFailure(error)
-    }
-  }
-
-  async linearResolveCurrentIssue(
-    context?: LinearCurrentIssueContextHints
-  ): Promise<ReturnType<typeof getLinearCurrentIssueFromWorktree>> {
-    if (!this.store) {
-      throw new Error('runtime_unavailable')
-    }
-
-    let worktree: ResolvedWorktree | null = null
-    if (context?.terminalHandle) {
-      try {
-        const terminal = await this.showTerminal(context.terminalHandle)
-        if (context.worktreeId && context.worktreeId !== terminal.worktreeId) {
-          throw new LinearAgentAccessError(
-            'linear_permission_denied',
-            'The provided Linear worktree context does not match the caller terminal.'
-          )
-        }
-        worktree = await this.resolveWorktreeSelector(`id:${terminal.worktreeId}`)
-      } catch (error) {
-        if (error instanceof LinearAgentAccessError) {
-          throw error
-        }
-        if (context.remote === true || context.worktreeId) {
-          throw new LinearAgentAccessError(
-            'linear_issue_required',
-            'Could not verify the current Linear-linked worktree.'
-          )
-        }
-      }
-    }
-
-    if (!worktree && context?.remote !== true && context?.cwd) {
-      worktree = await this.resolveWorktreeForContainedPath(context.cwd)
-      if (!worktree) {
-        throw new LinearAgentAccessError(
-          'linear_issue_required',
-          'Run --current from inside an Orca-managed worktree or pass an issue id.'
-        )
-      }
-    }
-
-    if (!worktree) {
-      throw new LinearAgentAccessError(
-        'linear_issue_required',
-        'Run --current from inside an Orca-managed worktree or pass an issue id.'
-      )
-    }
-
-    const link = getLinearCurrentIssueFromWorktree(worktree)
-    if (!link.workspaceId) {
-      const backfill = resolveLegacyLinearLinkWorkspace(
-        worktree.linkedLinearIssue ?? '',
-        worktree.linkedLinearIssueOrganizationUrlKey
-      )
-      if (backfill?.workspaceId) {
-        this.store.setWorktreeMeta(worktree.id, {
-          linkedLinearIssueWorkspaceId: backfill.workspaceId,
-          linkedLinearIssueOrganizationUrlKey: backfill.organizationUrlKey ?? null
-        })
-        return {
-          ...link,
-          workspaceId: backfill.workspaceId,
-          organizationUrlKey: backfill.organizationUrlKey ?? link.organizationUrlKey,
-          backfill
-        }
-      }
-    }
-    return link
-  }
-
-  private async resolveWorktreeForContainedPath(cwd: string): Promise<ResolvedWorktree | null> {
-    const currentPath = resolve(cwd)
-    let best: ResolvedWorktree | null = null
-    for (const candidate of await this.listResolvedWorktrees()) {
-      if (!isPathInsideOrEqual(candidate.path, currentPath)) {
-        continue
-      }
-      if (!best || candidate.path.length > best.path.length) {
-        best = candidate
-      }
-    }
-    return best
-  }
-
-  linearListIssues(
-    filter?: LinearListFilter,
-    limit = 20,
-    workspaceId?: LinearWorkspaceSelection,
-    teamId?: string
-  ): ReturnType<typeof listLinearIssues> {
-    return listLinearIssues(filter, clampLinearIssueListLimit(limit), workspaceId, teamId)
-  }
-
-  linearCreateIssue(
-    teamId: string,
-    title: string,
-    description?: string,
-    workspaceId?: string,
-    parentIssueId?: string,
-    projectId?: string | null,
-    options?: {
-      stateId?: string
-      priority?: number
-      estimate?: number | null
-      dueDate?: string | null
-      assigneeId?: string | null
-      labelIds?: string[]
-    }
-  ): ReturnType<typeof createLinearIssue> {
-    return createLinearIssue(teamId, title, description, workspaceId, {
-      parentId: parentIssueId,
-      projectId,
-      ...options
-    })
-  }
-
-  linearGetIssue(id: string, workspaceId?: string): ReturnType<typeof getLinearIssue> {
-    return getLinearIssue(id, workspaceId)
-  }
-
-  linearUpdateIssue(
-    id: string,
-    updates: LinearIssueUpdate,
-    workspaceId?: string
-  ): ReturnType<typeof updateLinearIssue> {
-    return updateLinearIssue(id, updates, workspaceId)
-  }
-
-  linearAddIssueComment(
-    issueId: string,
-    body: string,
-    workspaceId?: string
-  ): ReturnType<typeof addLinearIssueComment> {
-    return addLinearIssueComment(issueId, body, workspaceId)
-  }
-
-  async linearIssueSetState(params: {
-    input?: string
-    current?: boolean
-    workspaceId?: string
-    to: string
-    context?: LinearCurrentIssueContextHints
-  }): Promise<LinearStatusSetResult> {
-    const target = await this.resolveLinearAgentWriteTarget(params)
-    const teamId = target.issue.team?.id
-    if (!teamId) {
-      throw linearError('linear_invalid_state', 'The Linear issue does not have a team.')
-    }
-    const states = await this.getLinearTeamStatesForWrite(teamId, target.workspaceId)
-    const state = this.resolveLinearAgentState(params.to, states)
-    if (!state) {
-      throw linearError(
-        'linear_invalid_state',
-        `No workflow state exactly matched "${params.to}".`,
-        {
-          states: states.map(({ id, name, type }) => ({ id, name, type })),
-          nextSteps: [`Retry with one of the exact state names for ${target.issue.identifier}.`]
-        }
-      )
-    }
-
-    const previousState =
-      target.issue.state?.id && target.issue.state.name
-        ? { id: target.issue.state.id, name: target.issue.state.name }
-        : null
-    const alreadyInState = target.issue.state?.id === state.id
-    if (!alreadyInState) {
-      await this.runLinearAgentWrite(
-        async (signal) => {
-          const updated = await updateLinearIssueForAgent(
-            target.issue.id,
-            { stateId: state.id },
-            target.workspaceId,
-            {
-              signal
-            }
-          )
-          if (updated.state?.id !== state.id) {
-            throw new LinearWriteFailure(
-              'unconfirmed',
-              'Linear state update could not be confirmed.'
-            )
-          }
-          return updated
-        },
-        (cause) =>
-          linearError(
-            'linear_write_unconfirmed',
-            'Linear may have applied the state change, but Orca could not confirm it.',
-            {
-              nextSteps: [
-                `Run \`orca linear issue ${target.issue.identifier} --workspace ${target.workspaceId} --json\` and check the current state before retrying.`
-              ],
-              ...(cause ? { cause } : {})
-            }
-          )
-      )
-    }
-    await this.notifyLinearLinkedIssueUpdated(target.workspaceId, target.issue.identifier)
-    return {
-      issue: this.linearWriteIssueRef(target.issue),
-      state: { id: state.id, name: state.name, type: state.type },
-      previousState,
-      meta: { workspaceId: target.workspaceId, alreadyInState }
-    }
-  }
-
-  async linearIssueUpdateTask(
-    params: LinearIssueTaskUpdateRequest
-  ): Promise<LinearIssueTaskUpdateResult> {
-    const target = await this.resolveLinearAgentWriteTarget(params)
-    const current = await this.readLinearAgentIssueWriteRecord(target.issue.id, target.workspaceId)
-    const update = await this.buildLinearTaskUpdate(params, current, target.workspaceId)
-    if (!update) {
-      throw linearError('linear_write_failed', 'No Linear task field update was requested.')
-    }
-    const alreadySet = this.linearTaskFieldAlreadySet(params.operation, current, update)
-    if (!alreadySet) {
-      await this.runLinearAgentWrite(
-        async (signal) => {
-          const updated = await updateLinearIssueForAgent(
-            target.issue.id,
-            update.fields,
-            target.workspaceId,
-            { signal }
-          )
-          if (!this.linearTaskFieldAlreadySet(params.operation, updated, update)) {
-            throw new LinearWriteFailure(
-              'unconfirmed',
-              'Linear task field update could not be confirmed.'
-            )
-          }
-          return updated
-        },
-        (cause) =>
-          linearError(
-            'linear_write_unconfirmed',
-            'Linear may have applied the task update, but Orca could not confirm it.',
-            {
-              nextSteps: [
-                `Run \`orca linear issue ${target.issue.identifier} --workspace ${target.workspaceId} --json\` and check the updated field before retrying.`
-              ],
-              ...(cause ? { cause } : {})
-            }
-          )
-      )
-    }
-    await this.notifyLinearLinkedIssueUpdated(target.workspaceId, target.issue.identifier)
-    const finalRecord = alreadySet
-      ? current
-      : await this.readLinearAgentIssueWriteRecord(target.issue.id, target.workspaceId)
-    return this.linearTaskUpdateResult(
-      params.operation,
-      target.issue,
-      target.workspaceId,
-      current,
-      finalRecord,
-      alreadySet
-    )
-  }
-
-  async linearIssueAddComment(params: {
-    input?: string
-    current?: boolean
-    workspaceId?: string
-    body: string
-    replyTo?: string
-    writeId?: string
-    context?: LinearCurrentIssueContextHints
-  }): Promise<LinearCommentAddResult> {
-    if (params.body.length > LINEAR_WRITE_BODY_CAP) {
-      throw linearError('linear_body_too_large', 'Linear comment body is too large.')
-    }
-    const target = await this.resolveLinearAgentWriteTarget(params)
-    const parentId = params.replyTo
-      ? await this.resolveLinearCommentParentId(target.issue.id, params.replyTo, target.workspaceId)
-      : null
-    const writeId = params.writeId ?? randomUUID()
-    const existing =
-      params.writeId !== undefined
-        ? await this.getMatchingLinearCommentWrite(
-            writeId,
-            target.issue.id,
-            parentId,
-            target.workspaceId,
-            true
-          )
-        : null
-    if (existing) {
-      await this.notifyLinearLinkedIssueUpdated(target.workspaceId, target.issue.identifier)
-      return this.linearCommentResult(existing, target, params.body.length, writeId, true)
-    }
-
-    try {
-      const comment = await this.runLinearAgentWrite(
-        (signal) =>
-          addLinearIssueCommentForAgent(target.issue.id, params.body, target.workspaceId, {
-            id: writeId,
-            parentId,
-            signal
-          }),
-        (cause) =>
-          this.linearCreateStyleUnconfirmed('comment', writeId, target, {
-            parentId,
-            bodyRequired: true,
-            cause
-          })
-      )
-      await this.notifyLinearLinkedIssueUpdated(target.workspaceId, target.issue.identifier)
-      return this.linearCommentResult(comment, target, params.body.length, writeId, false)
-    } catch (error) {
-      if (error instanceof LinearWriteFailure && error.kind === 'duplicate_id') {
-        const comment = await this.refetchLinearCommentAfterDuplicate(
-          writeId,
-          target.issue.id,
-          parentId,
-          target.workspaceId,
-          () =>
-            this.linearCreateStyleUnconfirmed('comment', writeId, target, {
-              parentId,
-              bodyRequired: true
-            })
-        )
-        await this.notifyLinearLinkedIssueUpdated(target.workspaceId, target.issue.identifier)
-        return this.linearCommentResult(comment, target, params.body.length, writeId, true)
-      }
-      throw error
-    }
-  }
-
-  async linearIssueAttachLink(params: {
-    input?: string
-    current?: boolean
-    workspaceId?: string
-    url: string
-    title?: string
-    writeId?: string
-    context?: LinearCurrentIssueContextHints
-  }): Promise<LinearAttachResult> {
-    const url = this.parseLinearAttachmentUrl(params.url)
-    const target = await this.resolveLinearAgentWriteTarget(params)
-    const writeId = params.writeId ?? randomUUID()
-    const title = params.title?.trim() || this.defaultLinearAttachmentTitle(url)
-    const existing =
-      params.writeId !== undefined
-        ? await this.getMatchingLinearAttachmentWrite(
-            writeId,
-            target.issue.id,
-            target.workspaceId,
-            true
-          )
-        : null
-    if (existing) {
-      await this.notifyLinearLinkedIssueUpdated(target.workspaceId, target.issue.identifier)
-      return this.linearAttachResult(existing, target, writeId, true)
-    }
-    try {
-      const attachment = await this.runLinearAgentWrite(
-        (signal) =>
-          createLinearIssueAttachment(
-            target.issue.id,
-            { id: writeId, title, url: url.toString() },
-            target.workspaceId,
-            { signal }
-          ),
-        (cause) =>
-          this.linearCreateStyleUnconfirmed('attach', writeId, target, {
-            title,
-            url: url.toString(),
-            cause
-          })
-      )
-      await this.notifyLinearLinkedIssueUpdated(target.workspaceId, target.issue.identifier)
-      return this.linearAttachResult(attachment, target, writeId, false)
-    } catch (error) {
-      if (error instanceof LinearWriteFailure && error.kind === 'duplicate_id') {
-        const attachment = await this.refetchLinearAttachmentAfterDuplicate(
-          writeId,
-          target.issue.id,
-          target.workspaceId,
-          () =>
-            this.linearCreateStyleUnconfirmed('attach', writeId, target, {
-              title,
-              url: url.toString()
-            })
-        )
-        await this.notifyLinearLinkedIssueUpdated(target.workspaceId, target.issue.identifier)
-        return this.linearAttachResult(attachment, target, writeId, true)
-      }
-      throw error
-    }
-  }
-
-  async linearIssueCreate(params: {
-    title: string
-    body?: string
-    teamInput?: string
-    teamKey?: string
-    state?: string
-    assignee?: string
-    priority?: number
-    estimate?: number
-    dueDate?: string
-    labels?: string[]
-    projectInput?: string
-    parentInput?: string
-    parentCurrent?: boolean
-    workspaceId?: string
-    writeId?: string
-    context?: LinearCurrentIssueContextHints
-  }): Promise<LinearCreateResult> {
-    if ((params.body?.length ?? 0) > LINEAR_WRITE_BODY_CAP) {
-      throw linearError('linear_body_too_large', 'Linear issue body is too large.')
-    }
-    const parent =
-      params.parentInput || params.parentCurrent
-        ? await this.resolveLinearAgentWriteTarget({
-            input: params.parentInput,
-            current: params.parentCurrent,
-            workspaceId: params.workspaceId,
-            context: params.context
-          })
-        : null
-    if (parent && params.workspaceId && params.workspaceId !== parent.workspaceId) {
-      throw linearError(
-        'linear_invalid_workspace',
-        'The parent issue belongs to a different workspace.'
-      )
-    }
-    const team = await this.resolveLinearCreateTeam(
-      params.teamInput ?? params.teamKey,
-      params.workspaceId,
-      parent
-    )
-    const createFields = await this.resolveLinearCreateFields(params, team)
-    const parentId = parent?.issue.id ?? null
-    const writeId = params.writeId ?? randomUUID()
-    const existing =
-      params.writeId !== undefined
-        ? await this.getMatchingLinearCreatedIssue(
-            writeId,
-            team.id,
-            parentId,
-            team.workspaceId,
-            true,
-            createFields
-          )
-        : null
-    if (existing) {
-      if (parent) {
-        await this.notifyLinearLinkedIssueUpdated(parent.workspaceId, parent.issue.identifier)
-      }
-      return this.linearCreateResult(existing, team.workspaceId, writeId, true)
-    }
-
-    try {
-      const issue = await this.runLinearAgentWrite(
-        async (signal) => {
-          const created = await createLinearIssueForAgent(
-            team.id,
-            params.title,
-            params.body,
-            team.workspaceId,
-            {
-              id: writeId,
-              parentId,
-              ...createFields,
-              signal
-            }
-          )
-          if (!this.linearCreatedIssueMatchesIntent(created, createFields)) {
-            throw new LinearWriteFailure(
-              'unconfirmed',
-              'Linear issue create could not be confirmed with the requested task fields.'
-            )
-          }
-          return created
-        },
-        (cause) =>
-          this.linearCreateStyleUnconfirmed('create', writeId, null, {
-            team,
-            parent,
-            title: params.title,
-            bodyRequired: params.body !== undefined,
-            createFields,
-            cause
-          })
-      )
-      if (parent) {
-        await this.notifyLinearLinkedIssueUpdated(parent.workspaceId, parent.issue.identifier)
-      }
-      return this.linearCreateResult(issue, team.workspaceId, writeId, false)
-    } catch (error) {
-      if (error instanceof LinearWriteFailure && error.kind === 'duplicate_id') {
-        const issue = await this.refetchLinearIssueAfterDuplicate(
-          writeId,
-          team.id,
-          parentId,
-          team.workspaceId,
-          createFields,
-          () =>
-            this.linearCreateStyleUnconfirmed('create', writeId, null, {
-              team,
-              parent,
-              title: params.title,
-              bodyRequired: params.body !== undefined,
-              createFields
-            })
-        )
-        if (parent) {
-          await this.notifyLinearLinkedIssueUpdated(parent.workspaceId, parent.issue.identifier)
-        }
-        return this.linearCreateResult(issue, team.workspaceId, writeId, true)
-      }
-      throw error
-    }
-  }
-
-  private async resolveLinearAgentWriteTarget(params: {
-    input?: string
-    current?: boolean
-    workspaceId?: string
-    context?: LinearCurrentIssueContextHints
-  }): Promise<LinearAgentWriteTarget> {
-    const result = await readLinearIssueContext(
-      {
-        input: params.input,
-        current: params.current,
-        workspaceId: params.workspaceId,
-        include: { comments: false, children: false, attachments: false, relations: false },
-        depth: 0,
-        context: params.context
-      },
-      (context) => this.linearResolveCurrentIssue(context)
-    )
-    return { issue: result.issue, workspaceId: result.meta.resolved.workspaceId }
-  }
-
-  private async getLinearTeamStatesForWrite(
-    teamId: string,
-    workspaceId: string
-  ): Promise<Awaited<ReturnType<typeof getLinearTeamStatesOrThrow>>> {
-    try {
-      return await getLinearTeamStatesOrThrow(teamId, workspaceId)
-    } catch (error) {
-      throw this.mapLinearReadFailure(error)
-    }
-  }
-
-  private resolveLinearAgentState(
-    input: string,
-    states: Awaited<ReturnType<typeof getLinearTeamStatesOrThrow>>
-  ): Awaited<ReturnType<typeof getLinearTeamStatesOrThrow>>[number] | null {
-    const normalized = input.toLocaleLowerCase()
-    return (
-      states.find(
-        (state) =>
-          state.id.toLocaleLowerCase() === normalized ||
-          state.name.toLocaleLowerCase() === normalized
-      ) ?? null
-    )
-  }
-
-  private async getLinearTeamLabelsForWrite(
-    teamId: string,
-    workspaceId: string
-  ): Promise<Awaited<ReturnType<typeof getLinearTeamLabelsOrThrow>>> {
-    try {
-      return await getLinearTeamLabelsOrThrow(teamId, workspaceId)
-    } catch (error) {
-      throw this.mapLinearReadFailure(error)
-    }
-  }
-
-  private async readLinearAgentIssueWriteRecord(
-    issueId: string,
-    workspaceId: string
-  ): Promise<NonNullable<Awaited<ReturnType<typeof getLinearIssueByUuidForAgent>>>> {
-    const issue = await this.readLinearWriteLookup(() =>
-      getLinearIssueByUuidForAgent(issueId, workspaceId)
-    )
-    if (!issue) {
-      throw linearError('linear_issue_not_found', 'Linear issue was not found.')
-    }
-    return issue
-  }
-
-  private async buildLinearTaskUpdate(
-    params: LinearIssueTaskUpdateRequest,
-    current: NonNullable<Awaited<ReturnType<typeof getLinearIssueByUuidForAgent>>>,
-    workspaceId: string
-  ): Promise<{
-    fields: {
-      assigneeId?: string | null
-      priority?: number
-      estimate?: number | null
-      dueDate?: string | null
-      labelIds?: string[]
-    }
-    labels?: { id: string; name: string }[]
-  } | null> {
-    if (params.operation === 'assignee') {
-      const assigneeId = params.assigneeMe
-        ? (await this.getLinearViewerForWrite(workspaceId)).id
-        : params.assigneeId
-      if (assigneeId === undefined) {
-        throw linearError('linear_invalid_assignee', 'Pass --me, --to-id, or clear assignee.')
-      }
-      return { fields: { assigneeId } }
-    }
-    if (params.operation === 'priority') {
-      if (params.priority === undefined) {
-        throw linearError('linear_write_failed', 'Missing priority value.')
-      }
-      return { fields: { priority: params.priority } }
-    }
-    if (params.operation === 'estimate') {
-      if (params.estimate === undefined) {
-        throw linearError('linear_write_failed', 'Missing estimate value.')
-      }
-      return { fields: { estimate: params.estimate } }
-    }
-    if (params.operation === 'dueDate') {
-      if (params.dueDate === undefined) {
-        throw linearError('linear_write_failed', 'Missing due date value.')
-      }
-      return { fields: { dueDate: params.dueDate } }
-    }
-    if (params.operation === 'labels') {
-      const mode = params.labelMode
-      const inputs = params.labels ?? []
-      if (!mode || inputs.length === 0) {
-        throw linearError('linear_invalid_label', 'Pass at least one --label.')
-      }
-      const labels = await this.resolveLinearLabelsForIssue(current, inputs, workspaceId)
-      const requestedIds = labels.map((label) => label.id)
-      const existingIds = current.labelIds ?? current.labels?.map((label) => label.id) ?? []
-      const nextIds =
-        mode === 'set'
-          ? requestedIds
-          : mode === 'add'
-            ? Array.from(new Set([...existingIds, ...requestedIds]))
-            : existingIds.filter((id) => !requestedIds.includes(id))
-      return {
-        fields: { labelIds: nextIds },
-        labels: labelsForIds(nextIds, [...(current.labels ?? []), ...labels])
-      }
-    }
-    return null
-  }
-
-  private async resolveLinearCreateFields(
-    params: {
-      state?: string
-      assignee?: string
-      priority?: number
-      estimate?: number
-      dueDate?: string
-      labels?: string[]
-      projectInput?: string
-    },
-    team: { id: string; workspaceId: string }
-  ): Promise<LinearCreateFieldIntent> {
-    const fields: LinearCreateFieldIntent = {}
-    if (params.state) {
-      const states = await this.getLinearTeamStatesForWrite(team.id, team.workspaceId)
-      const state = this.resolveLinearAgentState(params.state, states)
-      if (!state) {
-        throw linearError(
-          'linear_invalid_state',
-          `No workflow state exactly matched "${params.state}".`,
-          { states: states.map(({ id, name, type }) => ({ id, name, type })) }
-        )
-      }
-      fields.stateId = state.id
-    }
-    if (params.assignee) {
-      fields.assigneeId =
-        params.assignee.toLocaleLowerCase() === 'me'
-          ? (await this.getLinearViewerForWrite(team.workspaceId)).id
-          : params.assignee
-    }
-    if (params.priority !== undefined) {
-      fields.priority = params.priority
-    }
-    if (params.estimate !== undefined) {
-      fields.estimate = params.estimate
-    }
-    if (params.dueDate !== undefined) {
-      fields.dueDate = params.dueDate
-    }
-    if (params.labels && params.labels.length > 0) {
-      const labels = await this.resolveLinearLabelsForTeam(team.id, params.labels, team.workspaceId)
-      fields.labelIds = labels.map((label) => label.id)
-    }
-    if (params.projectInput) {
-      const project = await this.resolveLinearCreateProject(params.projectInput, team)
-      fields.projectId = project.id
-    }
-    return fields
-  }
-
-  private async resolveLinearCreateProject(
-    input: string,
-    team: { id: string; workspaceId: string }
-  ): Promise<LinearProjectSummary> {
-    const trimmed = input.trim()
-    if (!trimmed) {
-      throw linearError('linear_invalid_project', 'Pass a non-empty Linear project id or name.')
-    }
-    const byId = isLinearUuid(trimmed)
-      ? await this.readLinearProjectByIdForCreate(trimmed, team.workspaceId)
-      : null
-    if (byId) {
-      await this.assertLinearProjectIncludesTeam(byId, team.id, team.workspaceId, trimmed)
-      return byId
-    }
-    const searchCandidates = await this.readLinearProjectsForCreate(trimmed, team.workspaceId)
-    const normalized = trimmed.toLowerCase()
-    const idMatch = searchCandidates.find((project) => project.id.toLowerCase() === normalized)
-    if (idMatch) {
-      await this.assertLinearProjectIncludesTeam(idMatch, team.id, team.workspaceId, trimmed)
-      return idMatch
-    }
-    const nameMatches = await this.readLinearProjectsByExactNameForCreate(trimmed, team.workspaceId)
-    const compatibleNameMatches = await this.filterLinearProjectsForTeam(
-      nameMatches,
-      team.id,
-      team.workspaceId
-    )
-    if (compatibleNameMatches.length === 1) {
-      return compatibleNameMatches[0]
-    }
-    if (compatibleNameMatches.length > 1) {
-      throw linearError(
-        'linear_invalid_project',
-        `Multiple Linear projects exactly matched "${trimmed}".`,
-        {
-          projects: compatibleNameMatches.map((project) => ({
-            id: project.id,
-            name: project.name,
-            teams: project.teams
-          })),
-          nextSteps: ['Run `orca linear project list --query <name> --json` and retry by id.']
-        }
-      )
-    }
-    if (nameMatches.length > 0) {
-      await this.assertLinearProjectIncludesTeam(nameMatches[0], team.id, team.workspaceId, trimmed)
-    }
-    throw linearError('linear_invalid_project', `No Linear project exactly matched "${trimmed}".`, {
-      projects: searchCandidates.map((project) => ({
-        id: project.id,
-        name: project.name,
-        teams: project.teams
-      })),
-      nextSteps: ['Run `orca linear project list --query <name> --json` and retry by id.']
-    })
-  }
-
-  private async readLinearProjectByIdForCreate(
-    id: string,
-    workspaceId: string
-  ): Promise<LinearProjectSummary | null> {
-    try {
-      return await getLinearProject(id, workspaceId, true)
-    } catch (error) {
-      throw this.mapLinearReadFailure(error)
-    }
-  }
-
-  private async readLinearProjectsForCreate(
-    query: string,
-    workspaceId: string
-  ): Promise<LinearProjectSummary[]> {
-    try {
-      return (await listLinearProjects(query, LINEAR_SEARCH_MAX_LIMIT, workspaceId, true)).items
-    } catch (error) {
-      throw this.mapLinearReadFailure(error)
-    }
-  }
-
-  private async readLinearProjectsByExactNameForCreate(
-    name: string,
-    workspaceId: string
-  ): Promise<LinearProjectSummary[]> {
-    try {
-      return await listLinearProjectsByExactName(name, workspaceId, true)
-    } catch (error) {
-      throw this.mapLinearReadFailure(error)
-    }
-  }
-
-  private async assertLinearProjectIncludesTeam(
-    project: LinearProjectSummary,
-    teamId: string,
-    workspaceId: string,
-    input: string
-  ): Promise<void> {
-    if (this.linearProjectIncludesTeam(project, teamId)) {
-      return
-    }
-    let teams: NonNullable<LinearProjectSummary['teams']> = []
-    try {
-      // Why: summary reads cap project teams, so large cross-team projects need
-      // a paged membership check before we reject an otherwise valid create.
-      teams = await listLinearProjectTeams(project.id, workspaceId, true)
-    } catch (error) {
-      throw this.mapLinearReadFailure(error)
-    }
-    if (teams.some((team) => team.id === teamId)) {
-      return
-    }
-    throw linearError(
-      'linear_invalid_project',
-      `Linear project "${input}" is not available to the target team.`,
-      {
-        project: { id: project.id, name: project.name, teams },
-        nextSteps: ['Choose a project that includes the create target team, then retry by id.']
-      }
-    )
-  }
-
-  private async filterLinearProjectsForTeam(
-    projects: LinearProjectSummary[],
-    teamId: string,
-    workspaceId: string
-  ): Promise<LinearProjectSummary[]> {
-    const compatible: LinearProjectSummary[] = []
-    for (const project of projects) {
-      if (this.linearProjectIncludesTeam(project, teamId)) {
-        compatible.push(project)
-        continue
-      }
-      try {
-        const teams = await listLinearProjectTeams(project.id, workspaceId, true)
-        if (teams.some((team) => team.id === teamId)) {
-          compatible.push({ ...project, teams })
-        }
-      } catch (error) {
-        throw this.mapLinearReadFailure(error)
-      }
-    }
-    return compatible
-  }
-
-  private linearProjectIncludesTeam(project: LinearProjectSummary, teamId: string): boolean {
-    return project.teams?.some((team) => team.id === teamId) === true
-  }
-
-  private async getLinearViewerForWrite(
-    workspaceId: string
-  ): Promise<{ id: string; displayName?: string | null; avatarUrl?: string | null }> {
-    try {
-      return await getLinearViewerForWorkspaceOrThrow(workspaceId)
-    } catch (error) {
-      throw this.mapLinearReadFailure(error)
-    }
-  }
-
-  private async resolveLinearLabelsForIssue(
-    issue: NonNullable<Awaited<ReturnType<typeof getLinearIssueByUuidForAgent>>>,
-    inputs: string[],
-    workspaceId: string
-  ): Promise<{ id: string; name: string }[]> {
-    const labels = await this.getLinearTeamLabelsForWrite(issue.team.id, workspaceId)
-    const resolved = inputs.map((input) => {
-      const normalized = input.toLocaleLowerCase()
-      const idMatch = labels.find((label) => label.id.toLocaleLowerCase() === normalized)
-      if (idMatch) {
-        return { id: idMatch.id, name: idMatch.name }
-      }
-      const nameMatches = labels.filter((label) => label.name.toLocaleLowerCase() === normalized)
-      if (nameMatches.length === 1) {
-        return { id: nameMatches[0].id, name: nameMatches[0].name }
-      }
-      throw linearError(
-        'linear_invalid_label',
-        nameMatches.length === 0
-          ? `No label exactly matched "${input}".`
-          : `Multiple labels exactly matched "${input}".`,
-        {
-          labels: labels.map((label) => ({ id: label.id, name: label.name })),
-          nextSteps: ['Run `orca linear team labels --team <key-or-id> --json` and retry by id.']
-        }
-      )
-    })
-    return Array.from(new Map(resolved.map((label) => [label.id, label])).values())
-  }
-
-  private async resolveLinearLabelsForTeam(
-    teamId: string,
-    inputs: string[],
-    workspaceId: string
-  ): Promise<{ id: string; name: string }[]> {
-    const labels = await this.getLinearTeamLabelsForWrite(teamId, workspaceId)
-    const resolved = inputs.map((input) => {
-      const normalized = input.toLocaleLowerCase()
-      const idMatch = labels.find((label) => label.id.toLocaleLowerCase() === normalized)
-      if (idMatch) {
-        return { id: idMatch.id, name: idMatch.name }
-      }
-      const nameMatches = labels.filter((label) => label.name.toLocaleLowerCase() === normalized)
-      if (nameMatches.length === 1) {
-        return { id: nameMatches[0].id, name: nameMatches[0].name }
-      }
-      throw linearError(
-        'linear_invalid_label',
-        nameMatches.length === 0
-          ? `No label exactly matched "${input}".`
-          : `Multiple labels exactly matched "${input}".`,
-        { labels: labels.map((label) => ({ id: label.id, name: label.name })) }
-      )
-    })
-    return Array.from(new Map(resolved.map((label) => [label.id, label])).values())
-  }
-
-  private linearCreatedIssueMatchesIntent(
-    issue: NonNullable<Awaited<ReturnType<typeof getLinearIssueByUuidForAgent>>>,
-    intent: LinearCreateFieldIntent
-  ): boolean {
-    if (intent.stateId !== undefined && issue.state?.id !== intent.stateId) {
-      return false
-    }
-    if (intent.assigneeId !== undefined && (issue.assignee?.id ?? null) !== intent.assigneeId) {
-      return false
-    }
-    if (intent.priority !== undefined && issue.priority !== intent.priority) {
-      return false
-    }
-    if (intent.estimate !== undefined && (issue.estimate ?? null) !== intent.estimate) {
-      return false
-    }
-    if (intent.dueDate !== undefined && (issue.dueDate ?? null) !== intent.dueDate) {
-      return false
-    }
-    if (intent.projectId !== undefined && (issue.project?.id ?? null) !== intent.projectId) {
-      return false
-    }
-    const issueLabelIds = issue.labelIds ?? issue.labels?.map((label) => label.id) ?? []
-    if (intent.labelIds !== undefined && !sameStringSet(issueLabelIds, intent.labelIds)) {
-      return false
-    }
-    return true
-  }
-
-  private linearTaskFieldAlreadySet(
-    operation: LinearIssueTaskUpdateRequest['operation'],
-    record: NonNullable<Awaited<ReturnType<typeof getLinearIssueByUuidForAgent>>>,
-    update: {
-      fields: {
-        assigneeId?: string | null
-        priority?: number
-        estimate?: number | null
-        dueDate?: string | null
-        labelIds?: string[]
-      }
-    }
-  ): boolean {
-    if (operation === 'assignee') {
-      return (record.assignee?.id ?? null) === update.fields.assigneeId
-    }
-    if (operation === 'priority') {
-      return record.priority === update.fields.priority
-    }
-    if (operation === 'estimate') {
-      return (record.estimate ?? null) === update.fields.estimate
-    }
-    if (operation === 'dueDate') {
-      return (record.dueDate ?? null) === update.fields.dueDate
-    }
-    if (operation === 'labels') {
-      const recordLabelIds = record.labelIds ?? record.labels?.map((label) => label.id) ?? []
-      return sameStringSet(recordLabelIds, update.fields.labelIds ?? [])
-    }
-    return false
-  }
-
-  private linearTaskUpdateResult(
-    operation: LinearIssueTaskUpdateRequest['operation'],
-    issue: LinearIssueSummary,
-    workspaceId: string,
-    previous: NonNullable<Awaited<ReturnType<typeof getLinearIssueByUuidForAgent>>>,
-    current: NonNullable<Awaited<ReturnType<typeof getLinearIssueByUuidForAgent>>>,
-    alreadySet: boolean
-  ): LinearIssueTaskUpdateResult {
-    return {
-      issue: this.linearWriteIssueRef(issue),
-      operation,
-      previous: this.linearTaskResultFields(previous),
-      current: this.linearTaskResultFields(current),
-      meta: { workspaceId, alreadySet }
-    }
-  }
-
-  private linearTaskResultFields(
-    record: NonNullable<Awaited<ReturnType<typeof getLinearIssueByUuidForAgent>>>
-  ): LinearIssueTaskUpdateResult['current'] {
-    return {
-      assignee: record.assignee ?? null,
-      priority: record.priority ?? null,
-      estimate: record.estimate ?? null,
-      dueDate: record.dueDate ?? null,
-      labels: record.labels ?? []
-    }
-  }
-
-  private async resolveLinearCommentParentId(
-    issueId: string,
-    commentId: string,
-    workspaceId: string
-  ): Promise<string> {
-    try {
-      const root = await getLinearIssueCommentThreadRoot(issueId, commentId, workspaceId)
-      if (!root) {
-        throw linearError(
-          'linear_invalid_parent',
-          'The reply target is not a comment on this issue.',
-          {
-            nextSteps: ['Run `orca linear issue <id> --comments --json` to list valid comment ids.']
-          }
-        )
-      }
-      return root.id
-    } catch (error) {
-      if (error instanceof LinearAgentAccessError) {
-        throw error
-      }
-      throw this.mapLinearReadFailure(error)
-    }
-  }
-
-  private async runLinearAgentWrite<T>(
-    write: (signal: AbortSignal) => Promise<T>,
-    unconfirmed: (cause?: string) => LinearAgentAccessError
-  ): Promise<T> {
-    const controller = new AbortController()
-    const writePromise = write(controller.signal)
-    writePromise.catch(() => undefined)
-    let timer: ReturnType<typeof setTimeout> | null = null
-    try {
-      return await Promise.race([
-        writePromise,
-        new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => {
-            controller.abort()
-            reject(
-              new LinearWriteFailure(
-                'unconfirmed',
-                'Linear write deadline elapsed before confirmation.'
-              )
-            )
-          }, 25_000)
-        })
-      ])
-    } catch (error) {
-      if (error instanceof LinearWriteFailure && error.kind === 'duplicate_id') {
-        throw error
-      }
-      if (error instanceof LinearWriteFailure && error.kind === 'unconfirmed') {
-        throw unconfirmed(this.linearWriteFailureCauseMessage(error))
-      }
-      if (error instanceof LinearWriteFailure && error.kind === 'network') {
-        throw linearError('linear_network_error', sanitizeLinearErrorMessage(error.message))
-      }
-      if (error instanceof LinearWriteFailure) {
-        throw linearError('linear_write_failed', sanitizeLinearErrorMessage(error.message))
-      }
-      throw this.mapLinearReadFailure(error)
-    } finally {
-      if (timer) {
-        clearTimeout(timer)
-      }
-    }
-  }
-
-  private linearWriteFailureCauseMessage(error: LinearWriteFailure): string {
-    if (error.cause instanceof Error) {
-      return sanitizeLinearErrorMessage(error.cause.message)
-    }
-    if (error.cause !== undefined) {
-      return sanitizeLinearErrorMessage(String(error.cause))
-    }
-    return sanitizeLinearErrorMessage(error.message)
-  }
-
-  private mapLinearReadFailure(error: unknown): LinearAgentAccessError {
-    if (error instanceof LinearAgentAccessError) {
-      return error
-    }
-    if (isLinearAuthError(error)) {
-      return linearError('linear_auth_expired', 'Linear authentication expired.', {
-        nextSteps: ['Reconnect Linear from Orca settings.']
-      })
-    }
-    return linearError(classifyLinearError(error), linearMessage(error))
-  }
-
-  private async getMatchingLinearCommentWrite(
-    writeId: string,
-    issueId: string,
-    parentId: string | null,
-    workspaceId: string,
-    required: boolean
-  ): Promise<Awaited<ReturnType<typeof getLinearCommentByUuidForAgent>> | null> {
-    const comment = await this.readLinearWriteLookup(() =>
-      getLinearCommentByUuidForAgent(writeId, workspaceId)
-    )
-    if (!comment) {
-      return null
-    }
-    if (comment.issue.id === issueId && comment.parentId === parentId) {
-      return comment
-    }
-    if (required) {
-      throw linearError(
-        'linear_invalid_write_id',
-        'The write id belongs to a different comment target.'
-      )
-    }
-    return null
-  }
-
-  private async getMatchingLinearAttachmentWrite(
-    writeId: string,
-    issueId: string,
-    workspaceId: string,
-    required: boolean
-  ): Promise<Awaited<ReturnType<typeof getLinearAttachmentByUuidForAgent>> | null> {
-    const attachment = await this.readLinearWriteLookup(() =>
-      getLinearAttachmentByUuidForAgent(writeId, workspaceId)
-    )
-    if (!attachment) {
-      return null
-    }
-    if (attachment.issue.id === issueId) {
-      return attachment
-    }
-    if (required) {
-      throw linearError(
-        'linear_invalid_write_id',
-        'The write id belongs to a different attachment target.'
-      )
-    }
-    return null
-  }
-
-  private async getMatchingLinearCreatedIssue(
-    writeId: string,
-    teamId: string,
-    parentId: string | null,
-    workspaceId: string,
-    required: boolean,
-    intent: LinearCreateFieldIntent = {}
-  ): Promise<Awaited<ReturnType<typeof getLinearIssueByUuidForAgent>> | null> {
-    const issue = await this.readLinearWriteLookup(() =>
-      getLinearIssueByUuidForAgent(writeId, workspaceId)
-    )
-    if (!issue) {
-      return null
-    }
-    if (
-      issue.team.id === teamId &&
-      (issue.parent?.id ?? null) === parentId &&
-      this.linearCreatedIssueMatchesIntent(issue, intent)
-    ) {
-      return issue
-    }
-    if (required) {
-      throw linearError(
-        'linear_invalid_write_id',
-        'The write id belongs to a different issue target.'
-      )
-    }
-    return null
-  }
-
-  private async refetchLinearCommentAfterDuplicate(
-    writeId: string,
-    issueId: string,
-    parentId: string | null,
-    workspaceId: string,
-    unconfirmed: (cause?: string) => LinearAgentAccessError
-  ): Promise<NonNullable<Awaited<ReturnType<typeof getLinearCommentByUuidForAgent>>>> {
-    try {
-      // Why: a duplicate-id response can mean the original write landed; only
-      // the exact target relationship proves this pinned retry.
-      const comment = await this.getMatchingLinearCommentWrite(
-        writeId,
-        issueId,
-        parentId,
-        workspaceId,
-        true
-      )
-      if (comment) {
-        return comment
-      }
-    } catch (error) {
-      if (error instanceof LinearAgentAccessError && error.code === 'linear_invalid_write_id') {
-        throw error
-      }
-      throw unconfirmed(
-        error instanceof Error
-          ? sanitizeLinearErrorMessage(error.message)
-          : sanitizeLinearErrorMessage(String(error))
-      )
-    }
-    throw unconfirmed()
-  }
-
-  private async refetchLinearAttachmentAfterDuplicate(
-    writeId: string,
-    issueId: string,
-    workspaceId: string,
-    unconfirmed: (cause?: string) => LinearAgentAccessError
-  ): Promise<NonNullable<Awaited<ReturnType<typeof getLinearAttachmentByUuidForAgent>>>> {
-    try {
-      // Why: a duplicate-id response can mean the original write landed; only
-      // the exact target relationship proves this pinned retry.
-      const attachment = await this.getMatchingLinearAttachmentWrite(
-        writeId,
-        issueId,
-        workspaceId,
-        true
-      )
-      if (attachment) {
-        return attachment
-      }
-    } catch (error) {
-      if (error instanceof LinearAgentAccessError && error.code === 'linear_invalid_write_id') {
-        throw error
-      }
-      throw unconfirmed(
-        error instanceof Error
-          ? sanitizeLinearErrorMessage(error.message)
-          : sanitizeLinearErrorMessage(String(error))
-      )
-    }
-    throw unconfirmed()
-  }
-
-  private async refetchLinearIssueAfterDuplicate(
-    writeId: string,
-    teamId: string,
-    parentId: string | null,
-    workspaceId: string,
-    intent: LinearCreateFieldIntent,
-    unconfirmed: (cause?: string) => LinearAgentAccessError
-  ): Promise<NonNullable<Awaited<ReturnType<typeof getLinearIssueByUuidForAgent>>>> {
-    try {
-      // Why: a duplicate-id response can mean the original write landed; only
-      // the exact target relationship proves this pinned retry.
-      const issue = await this.getMatchingLinearCreatedIssue(
-        writeId,
-        teamId,
-        parentId,
-        workspaceId,
-        true,
-        intent
-      )
-      if (issue) {
-        return issue
-      }
-    } catch (error) {
-      if (error instanceof LinearAgentAccessError && error.code === 'linear_invalid_write_id') {
-        throw error
-      }
-      throw unconfirmed(
-        error instanceof Error
-          ? sanitizeLinearErrorMessage(error.message)
-          : sanitizeLinearErrorMessage(String(error))
-      )
-    }
-    throw unconfirmed()
-  }
-
-  private async readLinearWriteLookup<T>(lookup: () => Promise<T>): Promise<T> {
-    try {
-      return await lookup()
-    } catch (error) {
-      throw this.mapLinearReadFailure(error)
-    }
-  }
-
-  private parseLinearAttachmentUrl(value: string): URL {
-    try {
-      const url = new URL(value)
-      if (url.protocol === 'http:' || url.protocol === 'https:') {
-        return url
-      }
-    } catch {
-      // Fall through to the stable agent-facing error below.
-    }
-    throw linearError('linear_invalid_url', 'Attachment URL must be an absolute http(s) URL.')
-  }
-
-  private defaultLinearAttachmentTitle(url: URL): string {
-    const tail = url.pathname.split('/').filter(Boolean).at(-1)
-    return tail ? `${url.host}/${tail}` : url.host
-  }
-
-  private linearWorkspaceErrorCode(type: string): LinearErrorCode {
-    if (type === 'auth') {
-      return 'linear_auth_expired'
-    }
-    if (type === 'network') {
-      return 'linear_network_error'
-    }
-    if (type === 'rate_limited') {
-      return 'linear_rate_limited'
-    }
-    return 'linear_write_failed'
-  }
-
-  private linearTeamSummary(team: {
-    id: string
-    name: string
-    key: string
-    url?: string
-    workspaceId?: string
-    workspaceName?: string
-  }): {
-    id: string
-    name: string
-    key: string
-    url?: string
-    workspace?: { id: string; name: string }
-  } {
-    return {
-      id: team.id,
-      name: team.name,
-      key: team.key,
-      ...(team.url ? { url: team.url } : {}),
-      ...(team.workspaceId
-        ? { workspace: { id: team.workspaceId, name: team.workspaceName ?? team.workspaceId } }
-        : {})
-    }
-  }
-
-  private async resolveLinearTeamInput(
-    teamInput: string,
-    workspaceId?: string | 'all'
-  ): Promise<{
-    id: string
-    key: string
-    name: string
-    workspaceId: string
-    workspaceName?: string
-  }> {
-    this.validateLinearCreateWorkspaceScope(workspaceId === 'all' ? undefined : workspaceId)
-    let teams: Awaited<ReturnType<typeof listLinearTeamsOrThrow>>
-    try {
-      teams = await listLinearTeamsOrThrow(workspaceId ?? 'all')
-    } catch (error) {
-      throw this.mapLinearReadFailure(error)
-    }
-    const normalized = teamInput.toLocaleLowerCase()
-    const idMatches = teams.filter((team) => team.id.toLocaleLowerCase() === normalized)
-    const matches =
-      idMatches.length > 0
-        ? idMatches
-        : teams.filter((team) => team.key.toLocaleLowerCase() === normalized)
-    if (matches.length === 1 && matches[0].workspaceId) {
-      return {
-        id: matches[0].id,
-        key: matches[0].key,
-        name: matches[0].name,
-        workspaceId: matches[0].workspaceId,
-        workspaceName: matches[0].workspaceName
-      }
-    }
-    if (matches.length > 1) {
-      throw linearError(
-        'linear_workspace_ambiguous',
-        `Team ${teamInput} exists in multiple workspaces.`,
-        {
-          candidates: matches.map((team) => ({
-            workspaceId: team.workspaceId,
-            workspaceName: team.workspaceName,
-            teamId: team.id,
-            teamKey: team.key
-          }))
-        }
-      )
-    }
-    throw linearError('linear_team_required', `No connected Linear team matched ${teamInput}.`)
-  }
-
-  private async resolveLinearCreateTeam(
-    teamInput: string | undefined,
-    workspaceId: string | undefined,
-    parent: LinearAgentWriteTarget | null
-  ): Promise<{ id: string; key: string; name: string; workspaceId: string }> {
-    if (!teamInput && parent?.issue.team?.id && parent.issue.team.key && parent.issue.team.name) {
-      return {
-        id: parent.issue.team.id,
-        key: parent.issue.team.key,
-        name: parent.issue.team.name,
-        workspaceId: parent.workspaceId
-      }
-    }
-    if (!teamInput) {
-      throw linearError('linear_team_required', 'Pass --team or create under a parent issue.', {
-        nextSteps: ['Run `orca linear create --team <key> ...` or use --parent-current.']
-      })
-    }
-
-    const scope = parent?.workspaceId ?? workspaceId
-    this.validateLinearCreateWorkspaceScope(scope)
-    let teams: Awaited<ReturnType<typeof listLinearTeamsOrThrow>>
-    try {
-      teams = await listLinearTeamsOrThrow(scope ?? 'all')
-    } catch (error) {
-      throw this.mapLinearReadFailure(error)
-    }
-    if (teams.length === 0 && (getLinearStatus().workspaces?.length ?? 0) === 0) {
-      throw linearError('linear_not_connected', 'Linear is not connected.', {
-        nextSteps: ['Connect Linear from Orca settings, then retry the issue create.']
-      })
-    }
-    const matches = teams.filter(
-      (team) =>
-        team.id.toLocaleLowerCase() === teamInput.toLocaleLowerCase() ||
-        team.key.toLocaleLowerCase() === teamInput.toLocaleLowerCase()
-    )
-    if (matches.length === 1 && matches[0].workspaceId) {
-      return {
-        id: matches[0].id,
-        key: matches[0].key,
-        name: matches[0].name,
-        workspaceId: matches[0].workspaceId
-      }
-    }
-    if (matches.length > 1) {
-      throw linearError(
-        'linear_workspace_ambiguous',
-        `Team ${teamInput} exists in multiple workspaces.`,
-        {
-          candidates: matches.map((team) => ({
-            workspaceId: team.workspaceId,
-            workspaceName: team.workspaceName,
-            teamKey: team.key
-          }))
-        }
-      )
-    }
-    if (parent) {
-      let globalTeams: Awaited<ReturnType<typeof listLinearTeamsOrThrow>>
-      try {
-        globalTeams = await listLinearTeamsOrThrow('all')
-      } catch (error) {
-        throw this.mapLinearReadFailure(error)
-      }
-      const globalMatch = globalTeams.find(
-        (team) =>
-          team.id.toLocaleLowerCase() === teamInput.toLocaleLowerCase() ||
-          team.key.toLocaleLowerCase() === teamInput.toLocaleLowerCase()
-      )
-      if (globalMatch) {
-        throw linearError(
-          'linear_invalid_workspace',
-          `Team ${teamInput} is not in the parent issue workspace.`
-        )
-      }
-    }
-    throw linearError('linear_team_required', `No connected Linear team matched ${teamInput}.`)
-  }
-
-  private validateLinearCreateWorkspaceScope(workspaceId: string | undefined): void {
-    if (!workspaceId) {
-      return
-    }
-    const workspaces = getLinearStatus().workspaces ?? []
-    if (workspaces.length > 0 && !workspaces.some((workspace) => workspace.id === workspaceId)) {
-      throw linearError(
-        'linear_invalid_workspace',
-        `No connected Linear workspace matched ${workspaceId}.`
-      )
-    }
-  }
-
-  private linearWriteIssueRef(issue: { id: string; identifier: string; url: string }): {
-    id: string
-    identifier: string
-    url: string
-  } {
-    return { id: issue.id, identifier: issue.identifier, url: issue.url }
-  }
-
-  private linearCommentResult(
-    comment: NonNullable<Awaited<ReturnType<typeof getLinearCommentByUuidForAgent>>>,
-    target: LinearAgentWriteTarget,
-    bodyChars: number,
-    writeId: string,
-    deduplicated: boolean
-  ): LinearCommentAddResult {
-    return {
-      comment: { id: comment.id, url: comment.url, parentId: comment.parentId },
-      issue: this.linearWriteIssueRef(target.issue),
-      meta: { workspaceId: target.workspaceId, bodyChars, writeId, deduplicated }
-    }
-  }
-
-  private linearAttachResult(
-    attachment: NonNullable<Awaited<ReturnType<typeof getLinearAttachmentByUuidForAgent>>>,
-    target: LinearAgentWriteTarget,
-    writeId: string,
-    deduplicated: boolean
-  ): LinearAttachResult {
-    return {
-      attachment: { id: attachment.id, title: attachment.title, url: attachment.url },
-      issue: this.linearWriteIssueRef(target.issue),
-      meta: { workspaceId: target.workspaceId, writeId, deduplicated }
-    }
-  }
-
-  private linearCreateResult(
-    issue: NonNullable<Awaited<ReturnType<typeof getLinearIssueByUuidForAgent>>>,
-    workspaceId: string,
-    writeId: string,
-    deduplicated: boolean
-  ): LinearCreateResult {
-    return {
-      issue,
-      meta: { workspaceId, writeId, deduplicated }
-    }
-  }
-
-  private linearCreateFieldRetryTokens(fields: LinearCreateFieldIntent | undefined): string[] {
-    if (!fields) {
-      return []
-    }
-    return [
-      ...(fields.stateId ? [`--state=${this.commandToken(fields.stateId, 'STATE_ID')}`] : []),
-      ...(fields.assigneeId
-        ? [`--assignee=${this.commandToken(fields.assigneeId, 'ASSIGNEE_ID')}`]
-        : []),
-      ...(fields.priority !== undefined
-        ? [`--priority=${this.linearPriorityRetryToken(fields.priority)}`]
-        : []),
-      ...(fields.estimate !== undefined && fields.estimate !== null
-        ? [`--estimate=${fields.estimate}`]
-        : []),
-      ...(fields.dueDate ? [`--due-date=${fields.dueDate}`] : []),
-      ...(fields.projectId
-        ? [`--project=${this.commandToken(fields.projectId, 'PROJECT_ID')}`]
-        : []),
-      ...(fields.labelIds ?? []).map(
-        (labelId) => `--label=${this.commandToken(labelId, 'LABEL_ID')}`
-      )
-    ]
-  }
-
-  private linearPriorityRetryToken(priority: number): string {
-    if (priority === 1) {
-      return 'urgent'
-    }
-    if (priority === 2) {
-      return 'high'
-    }
-    if (priority === 3) {
-      return 'medium'
-    }
-    if (priority === 4) {
-      return 'low'
-    }
-    return 'none'
-  }
-
-  private linearCreateStyleUnconfirmed(
-    verb: 'comment' | 'attach' | 'create',
-    writeId: string,
-    target: LinearAgentWriteTarget | null,
-    extra: {
-      parentId?: string | null
-      team?: { id: string; key: string; name: string; workspaceId: string }
-      parent?: LinearAgentWriteTarget | null
-      title?: string
-      url?: string
-      bodyRequired?: boolean
-      createFields?: LinearCreateFieldIntent
-      cause?: string
-    } = {}
-  ): LinearAgentAccessError {
-    const workspaceId = target?.workspaceId ?? extra.team?.workspaceId ?? ''
-    // Why: unconfirmed writes need a retry that preserves id and target so
-    // duplicate recovery can prove intent without matching mutable content.
-    const pinned =
-      verb === 'create'
-        ? [
-            'orca linear create',
-            `--workspace=${this.commandToken(workspaceId, 'WORKSPACE_ID')}`,
-            `--write-id=${this.commandToken(writeId, 'WRITE_ID')}`,
-            '--title TITLE_HERE',
-            ...(extra.bodyRequired ? ['--body-file -'] : []),
-            ...(extra.parent
-              ? [`--parent=${this.commandToken(extra.parent.issue.identifier, 'PARENT_ISSUE')}`]
-              : []),
-            ...(extra.team
-              ? [`--team=${this.commandToken(extra.team.key, 'TEAM_KEY')}`]
-              : []
-            ).concat(this.linearCreateFieldRetryTokens(extra.createFields))
-          ].join(' ')
-        : [
-            `orca linear ${verb === 'attach' ? 'attach' : 'comment add'}`,
-            this.commandToken(target?.issue.identifier ?? '', 'ISSUE_ID'),
-            `--workspace=${this.commandToken(workspaceId, 'WORKSPACE_ID')}`,
-            `--write-id=${this.commandToken(writeId, 'WRITE_ID')}`,
-            ...(verb === 'comment' ? ['--body-file -'] : []),
-            ...(verb === 'comment' && extra.parentId
-              ? [`--reply-to=${this.commandToken(extra.parentId, 'COMMENT_ID')}`]
-              : []),
-            ...(verb === 'attach' ? ['--url URL_HERE', '--title TITLE_HERE'] : [])
-          ].join(' ')
-    const retryPrefix = extra.bodyRequired || verb === 'comment' ? 'Pipe the same body and r' : 'R'
-    const payloadNote =
-      verb === 'attach'
-        ? ' Replace TITLE_HERE/URL_HERE with the exact original payload values before running.'
-        : verb === 'create'
-          ? ' Replace TITLE_HERE with the exact original title before running.'
-          : ''
-    return linearError(
-      'linear_write_unconfirmed',
-      'Linear may have applied the write, but Orca could not confirm it.',
-      {
-        writeId,
-        workspaceId,
-        issueIdentifier: target?.issue.identifier,
-        parentId: extra.parentId,
-        team: extra.team ? { id: extra.team.id, key: extra.team.key } : undefined,
-        parentIdentifier: extra.parent?.issue.identifier,
-        createFields: extra.createFields,
-        nextSteps: [
-          `${retryPrefix}etry once with the pinned command: \`${pinned}\`.${payloadNote}`
-        ],
-        ...(extra.cause ? { cause: sanitizeLinearErrorMessage(extra.cause) } : {})
-      }
-    )
-  }
-
-  private commandToken(value: string, placeholder: string): string {
-    return /^[A-Za-z0-9._:@%+=,/-]+$/.test(value) ? value : placeholder
-  }
-
-  private async notifyLinearLinkedIssueUpdated(
-    workspaceId: string,
-    identifier: string
-  ): Promise<void> {
-    const normalized = identifier.toLocaleUpperCase()
-    for (const worktree of await this.listResolvedWorktrees()) {
-      if ((worktree.linkedLinearIssue ?? '').toLocaleUpperCase() !== normalized) {
-        continue
-      }
-      const linkedWorkspaceId = worktree.linkedLinearIssueWorkspaceId ?? workspaceId
-      if (linkedWorkspaceId !== workspaceId) {
-        continue
-      }
-      this.emitClientEvent({
-        type: 'linearLinkedIssueUpdated',
-        worktreeId: worktree.id,
-        identifier,
-        workspaceId
-      })
-    }
-  }
-
-  linearIssueComments(
-    issueId: string,
-    workspaceId?: string
-  ): ReturnType<typeof getLinearIssueComments> {
-    return getLinearIssueComments(issueId, workspaceId)
-  }
-
-  linearListTeams(workspaceId?: LinearWorkspaceSelection): ReturnType<typeof listLinearTeams> {
-    return listLinearTeams(workspaceId)
-  }
-
-  linearListProjects(
-    query?: string,
-    limit = 20,
-    workspaceId?: LinearWorkspaceSelection,
-    force?: boolean
-  ): ReturnType<typeof listLinearProjects> {
-    return listLinearProjects(query, Math.min(Math.max(1, limit), 50), workspaceId, force)
-  }
-
-  linearCreateProject(
-    input: LinearProjectCreateInput,
-    workspaceId?: string
-  ): ReturnType<typeof createLinearProject> {
-    return createLinearProject(input, workspaceId)
-  }
-
-  linearGetProject(
-    id: string,
-    workspaceId: string,
-    force?: boolean
-  ): ReturnType<typeof getLinearProject> {
-    return getLinearProject(id, workspaceId, force)
-  }
-
-  linearListProjectIssues(
-    projectId: string,
-    limit = 20,
-    workspaceId: string,
-    force?: boolean
-  ): ReturnType<typeof listLinearProjectIssues> {
-    return listLinearProjectIssues(projectId, clampLinearIssueListLimit(limit), workspaceId, force)
-  }
-
-  linearListCustomViews(
-    model: LinearCustomViewModel,
-    limit = 20,
-    workspaceId?: LinearWorkspaceSelection,
-    force?: boolean
-  ): ReturnType<typeof listLinearCustomViews> {
-    return listLinearCustomViews(model, Math.min(Math.max(1, limit), 50), workspaceId, force)
-  }
-
-  linearGetCustomView(
-    viewId: string,
-    model: LinearCustomViewModel,
-    workspaceId: string,
-    force?: boolean
-  ): ReturnType<typeof getLinearCustomView> {
-    return getLinearCustomView(viewId, model, workspaceId, force)
-  }
-
-  linearListCustomViewIssues(
-    viewId: string,
-    limit = 20,
-    workspaceId: string,
-    force?: boolean
-  ): ReturnType<typeof listLinearCustomViewIssues> {
-    return listLinearCustomViewIssues(viewId, clampLinearIssueListLimit(limit), workspaceId, force)
-  }
-
-  linearListCustomViewProjects(
-    viewId: string,
-    limit = 20,
-    workspaceId: string,
-    force?: boolean
-  ): ReturnType<typeof listLinearCustomViewProjects> {
-    return listLinearCustomViewProjects(
-      viewId,
-      Math.min(Math.max(1, limit), 50),
-      workspaceId,
-      force
-    )
-  }
-
-  linearTeamStates(teamId: string, workspaceId?: string): ReturnType<typeof getLinearTeamStates> {
-    return getLinearTeamStates(teamId, workspaceId)
-  }
-
-  linearTeamLabels(teamId: string, workspaceId?: string): ReturnType<typeof getLinearTeamLabels> {
-    return getLinearTeamLabels(teamId, workspaceId)
-  }
-
-  linearTeamMembers(teamId: string, workspaceId?: string): ReturnType<typeof getLinearTeamMembers> {
-    return getLinearTeamMembers(teamId, workspaceId)
-  }
-
-  // ── Jira integration ──
-
-  jiraConnect(args: JiraConnectArgs): ReturnType<typeof connectJira> {
-    return connectJira(args)
-  }
-
-  jiraDisconnect(siteId?: string): { ok: true } {
-    disconnectJira(siteId)
-    return { ok: true }
-  }
-
-  jiraSelectSite(siteId: JiraSiteSelection): ReturnType<typeof getJiraStatus> {
-    return selectJiraSite(siteId)
-  }
-
-  jiraStatus(): ReturnType<typeof getJiraStatus> {
-    return getJiraStatus()
-  }
-
-  jiraTestConnection(siteId?: string): ReturnType<typeof testJiraConnection> {
-    return testJiraConnection(siteId)
-  }
-
-  jiraSearchIssues(
-    jql: string,
-    limit = 30,
-    siteId?: JiraSiteSelection
-  ): ReturnType<typeof searchJiraIssues> {
-    return searchJiraIssues(jql, Math.min(Math.max(1, limit), 100), siteId)
-  }
-
-  jiraListIssues(
-    filter?: JiraIssueFilter,
-    limit = 30,
-    siteId?: JiraSiteSelection
-  ): ReturnType<typeof listJiraIssues> {
-    return listJiraIssues(filter, Math.min(Math.max(1, limit), 100), siteId)
-  }
-
-  jiraCreateIssue(args: JiraCreateIssueArgs): ReturnType<typeof createJiraIssue> {
-    return createJiraIssue(args)
-  }
-
-  jiraGetIssue(key: string, siteId?: string): ReturnType<typeof getJiraIssue> {
-    return getJiraIssue(key, siteId)
-  }
-
-  jiraUpdateIssue(
-    key: string,
-    updates: JiraIssueUpdate,
-    siteId?: string
-  ): ReturnType<typeof updateJiraIssue> {
-    return updateJiraIssue(key, updates, siteId)
-  }
-
-  jiraAddIssueComment(
-    key: string,
-    body: string,
-    siteId?: string
-  ): ReturnType<typeof addJiraIssueComment> {
-    return addJiraIssueComment(key, body, siteId)
-  }
-
-  jiraIssueComments(key: string, siteId?: string): ReturnType<typeof getJiraIssueComments> {
-    return getJiraIssueComments(key, siteId)
-  }
-
-  jiraListProjects(siteId?: JiraSiteSelection): ReturnType<typeof listJiraProjects> {
-    return listJiraProjects(siteId)
-  }
-
-  jiraListIssueTypes(
-    projectIdOrKey: string,
-    siteId?: string
-  ): ReturnType<typeof listJiraIssueTypes> {
-    return listJiraIssueTypes(projectIdOrKey, siteId)
-  }
-
-  jiraListCreateFields(
-    projectIdOrKey: string,
-    issueTypeId: string,
-    siteId?: string
-  ): ReturnType<typeof listJiraCreateFields> {
-    return listJiraCreateFields(projectIdOrKey, issueTypeId, siteId)
-  }
-
-  jiraListPriorities(siteId?: string): ReturnType<typeof listJiraPriorities> {
-    return listJiraPriorities(siteId)
-  }
-
-  jiraListAssignableUsers(
-    key: string,
-    query?: string,
-    siteId?: string
-  ): ReturnType<typeof listJiraAssignableUsers> {
-    return listJiraAssignableUsers(key, query, siteId)
-  }
-
-  jiraListTransitions(key: string, siteId?: string): ReturnType<typeof listJiraTransitions> {
-    return listJiraTransitions(key, siteId)
-  }
+  private readonly linearCommands = new RuntimeLinearCommands({
+    getStore: () => this.store,
+    resolveWorktreeSelector: (selector) => this.resolveWorktreeSelector(selector),
+    listResolvedWorktrees: () => this.listResolvedWorktrees(),
+    showTerminal: (handle) => this.showTerminal(handle),
+    emitClientEvent: (event) => this.emitClientEvent(event)
+  })
+
+  linearConnect: RuntimeLinearCommands['linearConnect'] = this.linearCommands.linearConnect.bind(
+    this.linearCommands
+  )
+  linearDisconnect: RuntimeLinearCommands['linearDisconnect'] =
+    this.linearCommands.linearDisconnect.bind(this.linearCommands)
+  linearSelectWorkspace: RuntimeLinearCommands['linearSelectWorkspace'] =
+    this.linearCommands.linearSelectWorkspace.bind(this.linearCommands)
+  linearStatus: RuntimeLinearCommands['linearStatus'] = this.linearCommands.linearStatus.bind(
+    this.linearCommands
+  )
+  linearTestConnection: RuntimeLinearCommands['linearTestConnection'] =
+    this.linearCommands.linearTestConnection.bind(this.linearCommands)
+  linearSearchIssues: RuntimeLinearCommands['linearSearchIssues'] =
+    this.linearCommands.linearSearchIssues.bind(this.linearCommands)
+  linearSearchForAgents: RuntimeLinearCommands['linearSearchForAgents'] =
+    this.linearCommands.linearSearchForAgents.bind(this.linearCommands)
+  linearIssueContext: RuntimeLinearCommands['linearIssueContext'] =
+    this.linearCommands.linearIssueContext.bind(this.linearCommands)
+  linearTeamListForAgents: RuntimeLinearCommands['linearTeamListForAgents'] =
+    this.linearCommands.linearTeamListForAgents.bind(this.linearCommands)
+  linearTeamMembersForAgents: RuntimeLinearCommands['linearTeamMembersForAgents'] =
+    this.linearCommands.linearTeamMembersForAgents.bind(this.linearCommands)
+  linearTeamStatesForAgents: RuntimeLinearCommands['linearTeamStatesForAgents'] =
+    this.linearCommands.linearTeamStatesForAgents.bind(this.linearCommands)
+  linearTeamLabelsForAgents: RuntimeLinearCommands['linearTeamLabelsForAgents'] =
+    this.linearCommands.linearTeamLabelsForAgents.bind(this.linearCommands)
+  linearProjectListForAgents: RuntimeLinearCommands['linearProjectListForAgents'] =
+    this.linearCommands.linearProjectListForAgents.bind(this.linearCommands)
+  linearIssueListForAgents: RuntimeLinearCommands['linearIssueListForAgents'] =
+    this.linearCommands.linearIssueListForAgents.bind(this.linearCommands)
+  linearResolveCurrentIssue: RuntimeLinearCommands['linearResolveCurrentIssue'] =
+    this.linearCommands.linearResolveCurrentIssue.bind(this.linearCommands)
+  linearListIssues: RuntimeLinearCommands['linearListIssues'] =
+    this.linearCommands.linearListIssues.bind(this.linearCommands)
+  linearCreateIssue: RuntimeLinearCommands['linearCreateIssue'] =
+    this.linearCommands.linearCreateIssue.bind(this.linearCommands)
+  linearGetIssue: RuntimeLinearCommands['linearGetIssue'] = this.linearCommands.linearGetIssue.bind(
+    this.linearCommands
+  )
+  linearUpdateIssue: RuntimeLinearCommands['linearUpdateIssue'] =
+    this.linearCommands.linearUpdateIssue.bind(this.linearCommands)
+  linearAddIssueComment: RuntimeLinearCommands['linearAddIssueComment'] =
+    this.linearCommands.linearAddIssueComment.bind(this.linearCommands)
+  linearIssueSetState: RuntimeLinearCommands['linearIssueSetState'] =
+    this.linearCommands.linearIssueSetState.bind(this.linearCommands)
+  linearIssueUpdateTask: RuntimeLinearCommands['linearIssueUpdateTask'] =
+    this.linearCommands.linearIssueUpdateTask.bind(this.linearCommands)
+  linearIssueAddComment: RuntimeLinearCommands['linearIssueAddComment'] =
+    this.linearCommands.linearIssueAddComment.bind(this.linearCommands)
+  linearIssueAttachLink: RuntimeLinearCommands['linearIssueAttachLink'] =
+    this.linearCommands.linearIssueAttachLink.bind(this.linearCommands)
+  linearIssueCreate: RuntimeLinearCommands['linearIssueCreate'] =
+    this.linearCommands.linearIssueCreate.bind(this.linearCommands)
+  linearIssueComments: RuntimeLinearCommands['linearIssueComments'] =
+    this.linearCommands.linearIssueComments.bind(this.linearCommands)
+  linearListTeams: RuntimeLinearCommands['linearListTeams'] =
+    this.linearCommands.linearListTeams.bind(this.linearCommands)
+  linearListProjects: RuntimeLinearCommands['linearListProjects'] =
+    this.linearCommands.linearListProjects.bind(this.linearCommands)
+  linearCreateProject: RuntimeLinearCommands['linearCreateProject'] =
+    this.linearCommands.linearCreateProject.bind(this.linearCommands)
+  linearGetProject: RuntimeLinearCommands['linearGetProject'] =
+    this.linearCommands.linearGetProject.bind(this.linearCommands)
+  linearListProjectIssues: RuntimeLinearCommands['linearListProjectIssues'] =
+    this.linearCommands.linearListProjectIssues.bind(this.linearCommands)
+  linearListCustomViews: RuntimeLinearCommands['linearListCustomViews'] =
+    this.linearCommands.linearListCustomViews.bind(this.linearCommands)
+  linearGetCustomView: RuntimeLinearCommands['linearGetCustomView'] =
+    this.linearCommands.linearGetCustomView.bind(this.linearCommands)
+  linearListCustomViewIssues: RuntimeLinearCommands['linearListCustomViewIssues'] =
+    this.linearCommands.linearListCustomViewIssues.bind(this.linearCommands)
+  linearListCustomViewProjects: RuntimeLinearCommands['linearListCustomViewProjects'] =
+    this.linearCommands.linearListCustomViewProjects.bind(this.linearCommands)
+  linearTeamStates: RuntimeLinearCommands['linearTeamStates'] =
+    this.linearCommands.linearTeamStates.bind(this.linearCommands)
+  linearTeamLabels: RuntimeLinearCommands['linearTeamLabels'] =
+    this.linearCommands.linearTeamLabels.bind(this.linearCommands)
+  linearTeamMembers: RuntimeLinearCommands['linearTeamMembers'] =
+    this.linearCommands.linearTeamMembers.bind(this.linearCommands)
+
+  private readonly jiraCommands = new RuntimeJiraCommands()
+
+  jiraConnect: RuntimeJiraCommands['jiraConnect'] = this.jiraCommands.jiraConnect.bind(
+    this.jiraCommands
+  )
+  jiraDisconnect: RuntimeJiraCommands['jiraDisconnect'] = this.jiraCommands.jiraDisconnect.bind(
+    this.jiraCommands
+  )
+  jiraSelectSite: RuntimeJiraCommands['jiraSelectSite'] = this.jiraCommands.jiraSelectSite.bind(
+    this.jiraCommands
+  )
+  jiraStatus: RuntimeJiraCommands['jiraStatus'] = this.jiraCommands.jiraStatus.bind(
+    this.jiraCommands
+  )
+  jiraTestConnection: RuntimeJiraCommands['jiraTestConnection'] =
+    this.jiraCommands.jiraTestConnection.bind(this.jiraCommands)
+  jiraSearchIssues: RuntimeJiraCommands['jiraSearchIssues'] =
+    this.jiraCommands.jiraSearchIssues.bind(this.jiraCommands)
+  jiraListIssues: RuntimeJiraCommands['jiraListIssues'] = this.jiraCommands.jiraListIssues.bind(
+    this.jiraCommands
+  )
+  jiraCreateIssue: RuntimeJiraCommands['jiraCreateIssue'] = this.jiraCommands.jiraCreateIssue.bind(
+    this.jiraCommands
+  )
+  jiraGetIssue: RuntimeJiraCommands['jiraGetIssue'] = this.jiraCommands.jiraGetIssue.bind(
+    this.jiraCommands
+  )
+  jiraUpdateIssue: RuntimeJiraCommands['jiraUpdateIssue'] = this.jiraCommands.jiraUpdateIssue.bind(
+    this.jiraCommands
+  )
+  jiraAddIssueComment: RuntimeJiraCommands['jiraAddIssueComment'] =
+    this.jiraCommands.jiraAddIssueComment.bind(this.jiraCommands)
+  jiraIssueComments: RuntimeJiraCommands['jiraIssueComments'] =
+    this.jiraCommands.jiraIssueComments.bind(this.jiraCommands)
+  jiraListProjects: RuntimeJiraCommands['jiraListProjects'] =
+    this.jiraCommands.jiraListProjects.bind(this.jiraCommands)
+  jiraListIssueTypes: RuntimeJiraCommands['jiraListIssueTypes'] =
+    this.jiraCommands.jiraListIssueTypes.bind(this.jiraCommands)
+  jiraListCreateFields: RuntimeJiraCommands['jiraListCreateFields'] =
+    this.jiraCommands.jiraListCreateFields.bind(this.jiraCommands)
+  jiraListPriorities: RuntimeJiraCommands['jiraListPriorities'] =
+    this.jiraCommands.jiraListPriorities.bind(this.jiraCommands)
+  jiraListAssignableUsers: RuntimeJiraCommands['jiraListAssignableUsers'] =
+    this.jiraCommands.jiraListAssignableUsers.bind(this.jiraCommands)
+  jiraListTransitions: RuntimeJiraCommands['jiraListTransitions'] =
+    this.jiraCommands.jiraListTransitions.bind(this.jiraCommands)
 
   // ── Browser automation ──
 

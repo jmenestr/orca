@@ -103,5 +103,9 @@ crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 fm_tasks_axi_compatible && echo "TASKS_AXI: available"
-fleet_sync
+# Why: under FM_HOST=perch the Orca app owns the environment and there is no
+# local fleet of clones to refresh; skip the bootstrap fleet sync (and its
+# clone git work) and trust the perch context. The cheap tool/auth detection
+# above still runs so genuinely missing prerequisites surface.
+[ "${FM_HOST:-}" = "perch" ] || fleet_sync
 exit 0
