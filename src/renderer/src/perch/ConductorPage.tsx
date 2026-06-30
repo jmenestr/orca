@@ -9,10 +9,20 @@ import type { ConductorMessage, ConductorNoticeRef } from '@/perch/perch-client'
 import { ConductorDispatchDialog } from '@/perch/ConductorDispatchDialog'
 import { ConductorMarkdownMessage } from '@/perch/ConductorMarkdownMessage'
 import CommentMarkdown from '@/components/sidebar/CommentMarkdown'
+import {
+  applyConductorSuggestion,
+  useConductorComposerSuggestions
+} from '@/perch/ConductorComposerSuggestions'
+import { ConductorTaskChips } from '@/perch/ConductorTaskChips'
 
 // Why: the Conductor view — a plain-language chat with the firstmate conductor
 // that directs real Orca crewmates. Built on Orca's shadcn primitives and the
 // STYLEGUIDE tokens (worktree-sidebar / muted / border roles, 13px body text).
+function openIntegrationsSettings(): void {
+  useAppStore.getState().openSettingsTarget({ pane: 'integrations', repoId: null })
+  useAppStore.getState().openSettingsPage()
+}
+
 function ConductorMessageRow({
   message,
   onOpenPanel,
@@ -26,6 +36,10 @@ function ConductorMessageRow({
 }): React.JSX.Element {
   const isUser = message.role === 'user'
   const isNotice = message.role === 'notice'
+  const needsIntegrationConnect =
+    isNotice &&
+    (message.text.includes('connect') || message.text.includes('Connect integration')) &&
+    (message.text.includes('Integrations') || message.text.includes('notion.budget'))
   // Why: only offer the jump when the referenced agent still has a worktree to
   // reveal; a failed/cancelled dispatch carries a ref with no worktree.
   const agentRef = message.ref?.worktreeId ? message.ref : null
@@ -36,7 +50,12 @@ function ConductorMessageRow({
           'max-w-[680px] rounded-lg px-3 py-2 text-[13px] leading-relaxed break-words',
           isUser && 'bg-primary text-primary-foreground whitespace-pre-wrap',
           !isUser && !isNotice && 'bg-muted text-foreground',
-          isNotice && 'border border-border/60 bg-background/40 text-muted-foreground italic',
+          isNotice &&
+            !needsIntegrationConnect &&
+            'border border-border/60 bg-background/40 text-muted-foreground italic',
+          isNotice &&
+            needsIntegrationConnect &&
+            'border border-destructive/40 bg-destructive/5 text-foreground not-italic',
           isOpenInPanel && 'ring-1 ring-primary/40'
         )}
       >
@@ -45,6 +64,22 @@ function ConductorMessageRow({
             can run long — render them collapsed with a side-panel escape hatch. */}
         {isUser ? (
           message.text
+        ) : needsIntegrationConnect ? (
+          <div className="flex flex-col gap-2">
+            <p className="text-[13px] leading-relaxed">{message.text}</p>
+            <p className="text-[12px] text-muted-foreground">
+              No agent was dispatched. Connect Notion budget, then send @task:verify-expenses again.
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="w-fit"
+              onClick={openIntegrationsSettings}
+            >
+              Open Integrations
+            </Button>
+          </div>
         ) : (
           <div className="flex flex-col gap-1.5">
             <ConductorMarkdownMessage
@@ -115,6 +150,11 @@ export default function ConductorPage(): React.JSX.Element {
   const openActivityPage = useAppStore((s) => s.openActivityPage)
 
   const [draft, setDraft] = useState('')
+  const {
+    suggestions,
+    active: suggestionsActive,
+    reload: reloadSuggestions
+  } = useConductorComposerSuggestions(draft)
   const [dispatchOpen, setDispatchOpen] = useState(false)
   // Why: track the panel message by id (not the object) so a streaming/finalizing
   // turn stays in sync and the panel auto-closes if the message disappears.
@@ -149,14 +189,25 @@ export default function ConductorPage(): React.JSX.Element {
 
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (suggestionsActive && suggestions.length > 0 && suggestions[0]?.token) {
+        if (e.key === 'Tab') {
+          e.preventDefault()
+          setDraft(applyConductorSuggestion(draft, suggestions[0]!.token))
+          return
+        }
+      }
       // Enter submits; Shift+Enter inserts a newline.
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault()
         submit()
       }
     },
-    [submit]
+    [draft, submit, suggestions, suggestionsActive]
   )
+
+  const insertToken = useCallback((token: string) => {
+    setDraft((current) => (current.trim().length > 0 ? `${current.trimEnd()} ${token}` : token))
+  }, [])
 
   // Why: jump from a fleet report to the agent that produced it — open Activity
   // and reveal the agent's worktree, mirroring the fleet strip's open action.
@@ -230,30 +281,56 @@ export default function ConductorPage(): React.JSX.Element {
           </ScrollArea>
 
           <div className="border-t border-border px-4 py-3">
-            <div className="mx-auto flex w-full max-w-[820px] items-end gap-2">
-              <textarea
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={onKeyDown}
-                rows={1}
-                placeholder="Ship the dark mode toggle in widget…"
-                className={cn(
-                  'min-h-[40px] max-h-[160px] flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-[13px]',
-                  'placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring'
-                )}
-              />
-              <Button
-                onClick={submit}
-                disabled={draft.trim().length === 0}
-                className="h-10 gap-1.5"
-              >
-                {streaming ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Send className="size-4" />
-                )}
-                Send
-              </Button>
+            <div className="relative mx-auto w-full max-w-[820px]">
+              <ConductorTaskChips onInsert={insertToken} />
+              {suggestionsActive ? (
+                <div className="absolute bottom-full left-0 right-14 z-10 mb-2 overflow-hidden rounded-md border border-border bg-popover shadow-md">
+                  {suggestions.map((suggestion) => (
+                    <button
+                      key={suggestion.token || suggestion.label}
+                      type="button"
+                      disabled={!suggestion.token}
+                      className="block w-full px-3 py-2 text-left hover:bg-muted disabled:cursor-default disabled:opacity-70"
+                      onClick={() => {
+                        if (suggestion.token) {
+                          setDraft(applyConductorSuggestion(draft, suggestion.token))
+                        }
+                      }}
+                    >
+                      <div className="text-[13px] font-medium">{suggestion.label}</div>
+                      {suggestion.detail ? (
+                        <div className="text-[11px] text-muted-foreground">{suggestion.detail}</div>
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <div className="flex items-end gap-2">
+                <textarea
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={onKeyDown}
+                  onFocus={() => reloadSuggestions()}
+                  rows={1}
+                  placeholder="Describe the goal, or type @ to pick a SkillTask"
+                  className={cn(
+                    'min-h-[40px] max-h-[160px] flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-[13px]',
+                    'placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring'
+                  )}
+                />
+                <Button
+                  onClick={submit}
+                  disabled={draft.trim().length === 0}
+                  className="h-10 gap-1.5"
+                >
+                  {streaming ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Send className="size-4" />
+                  )}
+                  Send
+                </Button>
+              </div>
             </div>
           </div>
         </div>

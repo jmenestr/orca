@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
-import type { WorkflowsCatalogEntry } from '../../../../shared/workflows/skill-task-manifest'
+import type { WorkflowsCatalogEntry } from '../../../shared/workflows/skill-task-manifest'
 
 type ConductorTaskChipsProps = {
   onInsert: (token: string) => void

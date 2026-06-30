@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { WorkflowsCatalogEntry } from '../../../../shared/workflows/skill-task-manifest'
+import type { WorkflowsCatalogEntry } from '../../../shared/workflows/skill-task-manifest'
 
 export type ConductorSuggestion = {
   token: string
