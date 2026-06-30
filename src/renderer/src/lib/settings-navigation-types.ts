@@ -8,6 +8,7 @@ export type SettingsNavInstallStatus = 'install' | 'installed' | 'checking'
 export type SettingsNavTarget =
   | 'general'
   | 'integrations'
+  | 'skilltasks'
   | 'accounts'
   | 'browser'
   | 'git'

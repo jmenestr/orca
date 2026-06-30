@@ -1908,6 +1908,40 @@ export type PreloadApi = {
   skills: {
     discover: (target?: SkillDiscoveryTarget) => Promise<SkillDiscoveryResult>
   }
+  integrationConfig: {
+    list: () => Promise<{ profiles: unknown[] }>
+    get: (args: { profileId: string; revealSecrets?: boolean }) => Promise<unknown>
+    connect: (args: {
+      profileId: string
+      secrets?: Record<string, string>
+      config?: Record<string, string>
+    }) => Promise<unknown>
+    disconnect: (args: { profileId: string }) => Promise<{ ok: true }>
+    validate: (args: { profileId: string }) => Promise<unknown>
+  }
+  workflows: {
+    list: () => Promise<unknown>
+    skillList: () => Promise<{ skills: unknown[] }>
+    taskList: () => Promise<{ tasks: unknown[] }>
+    skillCreate: (args: { name: string; description?: string; body: string }) => Promise<unknown>
+    skillUpdate: (args: {
+      skillId: string
+      name?: string
+      description?: string
+      body?: string
+    }) => Promise<unknown>
+    skillDelete: (args: { skillId: string }) => Promise<{ ok: true }>
+    taskCreate: (args: unknown) => Promise<unknown>
+    taskUpdate: (args: unknown) => Promise<unknown>
+    taskDelete: (args: { taskId: string }) => Promise<{ ok: true }>
+    templatesList: () => Promise<{ templates: { id: string; label: string }[] }>
+    templateImport: (args: { templateId: string }) => Promise<{ skillId: string; taskId: string }>
+    materialize: () => Promise<{ skills: number; tasks: number }>
+    validateTask: (args: { taskId: string }) => Promise<{
+      ready: boolean
+      checks: { id: string; label: string; ok: boolean; detail?: string }[]
+    }>
+  }
   pet: {
     import: () => Promise<CustomPet | null>
     importPetBundle: () => Promise<CustomPet | null>

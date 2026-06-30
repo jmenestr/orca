@@ -2215,6 +2215,10 @@ export class OrcaRuntimeService {
     return this._perchDb
   }
 
+  getPerchDb(): PerchDb {
+    return this.getOrCreatePerchDb()
+  }
+
   getPerchService(): PerchService {
     const harness = normalizeConductorHarnessId(this.store?.getSettings()?.conductorHarness)
 

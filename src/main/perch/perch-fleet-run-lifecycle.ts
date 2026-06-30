@@ -23,6 +23,8 @@ import {
   type Task,
   type TaskStatus
 } from './perch-types'
+import { verifyLandingArtifacts, buildLandingNotice } from '../workflows/landing-artifacts'
+import { getWorkflowsService } from '../workflows/resolve'
 
 export type FleetObserveInput = {
   paneKey: string
@@ -189,7 +191,7 @@ export function applyRunUpdate(
 // surfaces a report into the conductor chat only on meaningful Run transitions
 // (idle/needs-input/exited/failed). Routine working churn is suppressed.
 export function reportRunTransition(
-  deps: Pick<FleetRunLifecycleDeps, 'pushFleetNotice' | 'taskNoticeRef'>,
+  deps: FleetRunLifecycleDeps,
   task: Task,
   previousStatus: RunStatus,
   nextStatus: RunStatus,
@@ -200,6 +202,36 @@ export function reportRunTransition(
   }
   const ref = deps.taskNoticeRef(task)
   if (nextStatus === 'idle') {
+    const ctx =
+      task.context && typeof task.context === 'object'
+        ? (task.context as Record<string, unknown>)
+        : null
+    const skillTaskId = typeof ctx?.skillTaskId === 'string' ? ctx.skillTaskId : null
+    const runId = typeof ctx?.runId === 'string' ? ctx.runId : null
+    if (task.landing === 'report' && skillTaskId && runId) {
+      try {
+        const manifest = getWorkflowsService().getManifest(skillTaskId)
+        if (manifest) {
+          const status = verifyLandingArtifacts(manifest, runId)
+          if (status.complete) {
+            const reviewMode =
+              (typeof ctx?.reviewMode === 'string' ? ctx.reviewMode : null) ??
+              manifest.review?.mode ??
+              'chat-only'
+            const nextTaskStatus: TaskStatus = reviewMode === 'report-first' ? 'in_review' : 'done'
+            if (!isTerminalTaskStatus(task.status) && task.status !== nextTaskStatus) {
+              const updated: Task = { ...task, status: nextTaskStatus, updatedAt: nowSeconds() }
+              deps.db.upsertTask(updated)
+              deps.emitTask(updated)
+            }
+            deps.pushFleetNotice(buildLandingNotice({ title: task.title, status, ref }), ref)
+            return
+          }
+        }
+      } catch {
+        // Fall through to the default turn notice.
+      }
+    }
     // Why: idle means the agent finished THIS turn, not the whole task. Surface
     // a soft "finished a turn" so the captain can look, without ending the Task.
     // Pass the agent's full last message (already capped upstream at the hook

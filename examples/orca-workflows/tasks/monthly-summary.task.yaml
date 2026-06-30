@@ -1,0 +1,40 @@
+id: monthly-summary
+title: Monthly spending summary
+version: 1
+
+skill: skills/notion-budget-summary/SKILL.md
+
+integration:
+  profiles:
+    - notion.budget
+
+kind: chore
+landing:
+  type: report
+  paths:
+    summary: reports/{runId}/summary.md
+    data: reports/{runId}/result.json
+  schema: monthly-summary/v1
+
+review:
+  mode: chat-only
+
+visibility: board
+
+aliases:
+  - spending summary
+  - how much did I spend
+
+scriptContracts:
+  - id: monthly-summary
+    path: monthly-summary.ts
+    command:
+      - node
+      - monthly-summary.ts
+      - --version
+    expectExitCode: 0
+    minVersion: 1.0.0
+
+precheck:
+  command: node monthly-summary.ts --precheck --profile notion.budget
+  timeoutSeconds: 30

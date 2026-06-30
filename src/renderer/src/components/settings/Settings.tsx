@@ -39,6 +39,7 @@ import { OrchestrationPane } from './OrchestrationPane'
 import { AccountsPane } from './AccountsPane'
 import { StatsPane } from '../stats/StatsPane'
 import { IntegrationsPane } from './IntegrationsPane'
+import { WorkflowsSettingsPane } from './WorkflowsSettingsPane'
 import { TasksPane } from './TasksPane'
 import { QuickCommandsPane } from './QuickCommandsPane'
 import { DeveloperPermissionsPane } from './DeveloperPermissionsPane'
@@ -1211,6 +1212,18 @@ function Settings(): React.JSX.Element {
                   bodyClassName="rounded-none border-0 bg-transparent p-0 shadow-none"
                 >
                   {isSectionMounted('integrations') ? <IntegrationsPane /> : null}
+                </SettingsSection>
+
+                <SettingsSection
+                  id="skilltasks"
+                  title={translate('auto.components.settings.Settings.skilltasks', 'SkillTasks')}
+                  description={translate(
+                    'auto.components.settings.Settings.skilltasksDescription',
+                    'Author skills and dispatchable jobs for Conductor (@task:id).'
+                  )}
+                  searchEntries={getSectionSearchEntries('skilltasks')}
+                >
+                  {isSectionMounted('skilltasks') ? <WorkflowsSettingsPane /> : null}
                 </SettingsSection>
 
                 <SettingsSection

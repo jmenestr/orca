@@ -6,6 +6,11 @@
 import { z } from 'zod'
 import { defineMethod, defineStreamingMethod, type RpcAnyMethod } from '../../runtime/rpc/core'
 import { requiredString } from '../../runtime/rpc/schemas'
+import { buildConductorModelPrefix, parseConductorTurn } from '../../workflows/conductor-parser'
+import {
+  dispatchSkillTaskFromConductor,
+  steerPerchRunFollowUp
+} from '../../workflows/skill-task-dispatch'
 
 import { PERCH_WORK_METHODS } from './perch-work-methods'
 
@@ -20,12 +25,48 @@ export const PERCH_METHODS: readonly RpcAnyMethod[] = [
     name: 'perch.conductor.send',
     params: ConductorSendParams,
     handler: async (params, { runtime }) => {
-      // Why: give the conductor model a fresh fleet snapshot at the start of each
-      // turn (plan 1b) by prepending it to the model's input — not as a captain-
-      // facing transcript notice. Fleet deltas between turns reach the UI via
-      // perch:workChanged; the next turn's snapshot reflects the latest state.
+      const parsed = parseConductorTurn(params.text)
+      if (!parsed.ok) {
+        throw new Error(parsed.error.hint ?? parsed.error.message)
+      }
+      const intent = parsed.intent
       const snapshot = runtime.getPerchFleetService().formatFleetSnapshotForTurn()
-      await runtime.getPerchService().send(params.text, { modelPrefix: snapshot })
+      let envelope: Record<string, unknown> = {}
+
+      if (intent.skillTaskId) {
+        const dispatch = await dispatchSkillTaskFromConductor({ runtime, intent })
+        envelope = {
+          skillTaskId: intent.skillTaskId,
+          perchTaskId: dispatch.perchTaskId,
+          runId: dispatch.runId,
+          integrationProfiles: dispatch.resolved.manifest.integration.profiles,
+          landingPaths: dispatch.resolved.manifest.landing.paths,
+          dispatched: true
+        }
+        const prefix = buildConductorModelPrefix(intent, envelope)
+        await runtime.getPerchService().send(intent.userContext || params.text, {
+          modelPrefix: `${snapshot}\n\n${prefix}`
+        })
+        return { ok: true, dispatched: true, perchTaskId: dispatch.perchTaskId }
+      }
+
+      if (intent.perchTaskId) {
+        const followUp = await steerPerchRunFollowUp({ runtime, intent })
+        envelope = { perchTaskId: followUp.perchTaskId, followUp: true }
+        const prefix = buildConductorModelPrefix(intent, envelope)
+        await runtime.getPerchService().send(intent.userContext || params.text, {
+          modelPrefix: `${snapshot}\n\n${prefix}`
+        })
+        return { ok: true, followUp: true, perchTaskId: followUp.perchTaskId }
+      }
+
+      if (intent.skillOverride) {
+        envelope = { skillOverride: intent.skillOverride }
+      }
+
+      const prefix =
+        Object.keys(envelope).length > 0 ? buildConductorModelPrefix(intent, envelope) : snapshot
+      await runtime.getPerchService().send(params.text, { modelPrefix: prefix })
       return { ok: true }
     }
   }),

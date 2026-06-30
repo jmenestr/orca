@@ -34,6 +34,8 @@ import { registerSessionHandlers } from './session'
 import { registerSettingsHandlers } from './settings'
 import { registerDiagnosticsHandlers } from './diagnostics'
 import { registerSkillsHandlers } from './skills'
+import { registerIntegrationConfigHandlers } from './integration-config'
+import { registerWorkflowsHandlers } from './workflows'
 import { registerWorkspaceSpaceHandlers } from './workspace-space'
 import { registerWorkspacePortHandlers } from './workspace-ports'
 import { registerAutomationHandlers } from './automations'
@@ -61,7 +63,7 @@ import type { RateLimitService } from '../rate-limits/service'
 import type { CodexAccountService } from '../codex-accounts/service'
 import type { ClaudeAccountService } from '../claude-accounts/service'
 import type { AutomationService } from '../automations/service'
-import type { AgentAwakeService } from '../agent-awake-service'
+import type { AgentAwakeService } from '../agent-trust/awake-service'
 import type { CrashReportStore } from '../crash-reporting/crash-report-store'
 import type { KeybindingService } from '../keybindings/keybinding-service'
 
@@ -138,6 +140,8 @@ export function registerCoreHandlers(
   registerComputerUsePermissionHandlers()
   registerSettingsHandlers(store, agentAwakeService)
   registerSkillsHandlers(store)
+  registerIntegrationConfigHandlers()
+  registerWorkflowsHandlers()
   if (automations) {
     registerAutomationHandlers(store, automations)
   }

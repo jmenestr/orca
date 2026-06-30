@@ -30,7 +30,8 @@ import {
   SquareTerminal,
   TextCursorInput,
   UserCog,
-  Wrench
+  Wrench,
+  Workflow
 } from 'lucide-react'
 import { OrcaLogoSettingsIcon } from '@/components/settings/orca-logo-settings-icon'
 import type { Repo } from '../../../shared/types'
@@ -42,6 +43,7 @@ import { getGeneralPaneSearchEntries } from '@/components/settings/general-searc
 import { getAgentsPaneSearchEntries } from '@/components/settings/agents-search'
 import { getAccountsPaneSearchEntries } from '@/components/settings/accounts-search'
 import { getIntegrationsPaneSearchEntries } from '@/components/settings/integrations-search'
+import { getWorkflowsSettingsSearchEntries } from '@/components/settings/WorkflowsSettingsPane'
 import { getGitPaneSearchEntries } from '@/components/settings/git-search'
 import { getGitProviderApiBudgetSearchEntries } from '@/components/settings/git-provider-api-budget-search'
 import { getCommitMessageAiPaneSearchEntries } from '@/components/settings/commit-message-ai-search'
@@ -224,6 +226,17 @@ export function buildSettingsNavigationMetadata({
       icon: Blocks,
       searchEntries: getIntegrationsPaneSearchEntries(),
       group: 'setup'
+    },
+    {
+      id: 'skilltasks',
+      title: translate('auto.hooks.useSettingsNavigationMetadata.skilltasks', 'SkillTasks'),
+      description: translate(
+        'auto.hooks.useSettingsNavigationMetadata.skilltasksDescription',
+        'Author skills and dispatchable jobs for Conductor (@task:id).'
+      ),
+      icon: Workflow,
+      searchEntries: getWorkflowsSettingsSearchEntries(),
+      group: 'workflows'
     },
     {
       id: 'git',

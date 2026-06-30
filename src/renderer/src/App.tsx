@@ -274,7 +274,7 @@ const TaskPage = lazy(() => import('./components/TaskPage'))
 const AutomationsPage = lazy(() => import('./components/automations/AutomationsPage'))
 const ActivityPrototypePage = lazy(() => import('./components/activity/ActivityPrototypePage'))
 const Settings = lazy(() => import('./components/settings/Settings'))
-const SkillsPage = lazy(() => import('./components/skills/SkillsPage'))
+const WorkflowsPage = lazy(() => import('./pages/workflows/WorkflowsPage'))
 const WorkspaceSpacePage = lazy(() => import('./components/workspace-space/WorkspaceSpacePage'))
 const MobilePage = lazy(() => import('./components/mobile/MobilePage'))
 const ConductorPage = lazy(() => import('./perch/ConductorPage'))
@@ -2251,7 +2251,7 @@ function App(): React.JSX.Element {
                               )}
                             >
                               {activeView === 'settings' ? <Settings /> : null}
-                              {activeView === 'skills' ? <SkillsPage /> : null}
+                              {activeView === 'skills' ? <WorkflowsPage /> : null}
                               {activeView === 'tasks' ? <TaskPage /> : null}
                               {activeView === 'automations' ? <AutomationsPage /> : null}
                               {activeView === 'activity' ? <ActivityPrototypePage /> : null}
