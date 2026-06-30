@@ -1905,6 +1905,51 @@ const api = {
       ipcRenderer.invoke('skills:discover', target)
   },
 
+  integrationConfig: {
+    list: (): Promise<{ profiles: unknown[] }> => ipcRenderer.invoke('integrationConfig:list'),
+    get: (args: { profileId: string; revealSecrets?: boolean }): Promise<unknown> =>
+      ipcRenderer.invoke('integrationConfig:get', args),
+    connect: (args: {
+      profileId: string
+      secrets?: Record<string, string>
+      config?: Record<string, string>
+    }): Promise<unknown> => ipcRenderer.invoke('integrationConfig:connect', args),
+    disconnect: (args: { profileId: string }): Promise<{ ok: true }> =>
+      ipcRenderer.invoke('integrationConfig:disconnect', args),
+    validate: (args: { profileId: string }): Promise<unknown> =>
+      ipcRenderer.invoke('integrationConfig:validate', args)
+  },
+
+  workflows: {
+    list: (): Promise<unknown> => ipcRenderer.invoke('workflows:list'),
+    skillList: (): Promise<{ skills: unknown[] }> => ipcRenderer.invoke('workflows:skillList'),
+    taskList: (): Promise<{ tasks: unknown[] }> => ipcRenderer.invoke('workflows:taskList'),
+    skillCreate: (args: { name: string; description?: string; body: string }): Promise<unknown> =>
+      ipcRenderer.invoke('workflows:skillCreate', args),
+    skillUpdate: (args: {
+      skillId: string
+      name?: string
+      description?: string
+      body?: string
+    }): Promise<unknown> => ipcRenderer.invoke('workflows:skillUpdate', args),
+    skillDelete: (args: { skillId: string }): Promise<{ ok: true }> =>
+      ipcRenderer.invoke('workflows:skillDelete', args),
+    taskCreate: (args: unknown): Promise<unknown> =>
+      ipcRenderer.invoke('workflows:taskCreate', args),
+    taskUpdate: (args: unknown): Promise<unknown> =>
+      ipcRenderer.invoke('workflows:taskUpdate', args),
+    taskDelete: (args: { taskId: string }): Promise<{ ok: true }> =>
+      ipcRenderer.invoke('workflows:taskDelete', args),
+    templatesList: (): Promise<{ templates: { id: string; label: string }[] }> =>
+      ipcRenderer.invoke('workflows:templatesList'),
+    templateImport: (args: { templateId: string }): Promise<{ skillId: string; taskId: string }> =>
+      ipcRenderer.invoke('workflows:templateImport', args),
+    materialize: (): Promise<{ skills: number; tasks: number }> =>
+      ipcRenderer.invoke('workflows:materialize'),
+    validateTask: (args: { taskId: string }): Promise<unknown> =>
+      ipcRenderer.invoke('workflows:validateTask', args)
+  },
+
   pet: {
     import: (): Promise<CustomPet | null> => ipcRenderer.invoke('pet:import'),
     importPetBundle: (): Promise<CustomPet | null> => ipcRenderer.invoke('pet:importPetBundle'),

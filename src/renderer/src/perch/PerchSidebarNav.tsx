@@ -1,5 +1,5 @@
 import React from 'react'
-import { Columns3, Wand2 } from 'lucide-react'
+import { Columns3, Wand2, Workflow } from 'lucide-react'
 import { useAppStore } from '@/store'
 import { cn } from '@/lib/utils'
 
@@ -41,6 +41,7 @@ function PerchNavButton({
 const PerchSidebarNav = React.memo(function PerchSidebarNav() {
   const openConductorPage = useAppStore((s) => s.openConductorPage)
   const openTaskBoard = useAppStore((s) => s.openTaskBoard)
+  const openSkillsPage = useAppStore((s) => s.openSkillsPage)
   const activeView = useAppStore((s) => s.activeView)
 
   return (
@@ -56,6 +57,12 @@ const PerchSidebarNav = React.memo(function PerchSidebarNav() {
         onClick={openTaskBoard}
         icon={Columns3}
         label="Board"
+      />
+      <PerchNavButton
+        active={activeView === 'skills'}
+        onClick={openSkillsPage}
+        icon={Workflow}
+        label="Workflows"
       />
     </>
   )

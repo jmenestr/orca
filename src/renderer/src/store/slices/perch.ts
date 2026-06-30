@@ -1,4 +1,5 @@
 import type { StateCreator } from 'zustand'
+import type { PerchDispatchHarness } from '../../../../shared/perch-dispatch-harness'
 import type { AppState } from '../types'
 import {
   asConductorFrame,
@@ -53,7 +54,11 @@ export type PerchSlice = {
     repoSelector?: string
     mode?: Task['mode']
   }) => Promise<Task | null>
-  dispatchBoardTask: (id: string, repoSelector?: string) => Promise<Task | null>
+  dispatchBoardTask: (
+    id: string,
+    repoSelector?: string,
+    harness?: PerchDispatchHarness
+  ) => Promise<Task | null>
   setBoardTaskProject: (id: string, repoSelector: string) => Promise<Task | null>
   syncBoardLinear: () => Promise<void>
 }
@@ -245,16 +250,20 @@ export const createPerchSlice: StateCreator<AppState, [], [], PerchSlice> = (set
     }
   },
 
-  dispatchBoardTask: async (id, repoSelector) => {
+  dispatchBoardTask: async (id, repoSelector, harness) => {
     try {
-      const { task } = await dispatchExistingTask(id, repoSelector)
+      const { task } = await dispatchExistingTask(id, repoSelector, harness)
       get().applyConductorTask(task)
       return task
     } catch (err) {
-      // Why: re-throw so the board can surface the reason (e.g. branch collision)
-      // instead of silently swallowing it. The server already marked the task
-      // failed and pushed the update, so refresh to reflect that, then rethrow.
-      void get().hydrateBoard()
+      // Why: worktree creation can succeed on the main process while the renderer
+      // still sees a failure (e.g. a stale RPC error). Reconcile before toasting.
+      await get().hydrateBoard()
+      const fresh = get().boardTasks.find((t) => t.id === id)
+      if (fresh?.currentRun || fresh?.worktree) {
+        get().applyConductorTask(fresh)
+        return fresh
+      }
       throw err instanceof Error ? err : new Error(String(err))
     }
   },
@@ -290,13 +299,18 @@ export const createPerchSlice: StateCreator<AppState, [], [], PerchSlice> = (set
     try {
       await sendConductorMessage(trimmed)
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      const isDispatchError =
+        message.includes('SkillTask') ||
+        message.includes('Connect integration') ||
+        message.includes('@task:')
       set((state) => ({
         conductorTranscript: [
           ...state.conductorTranscript,
           {
             id: nextId('notice'),
             role: 'notice',
-            text: `Failed to reach the conductor: ${err instanceof Error ? err.message : String(err)}`
+            text: isDispatchError ? message : `Failed to reach the conductor: ${message}`
           }
         ],
         conductorStreaming: false

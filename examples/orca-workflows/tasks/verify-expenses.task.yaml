@@ -1,0 +1,39 @@
+id: verify-expenses
+title: Verify uploaded Notion expenses
+version: 1
+
+skill: skills/notion-budget-verify/SKILL.md
+
+integration:
+  profiles:
+    - notion.budget
+
+kind: chore
+landing:
+  type: report
+  paths:
+    summary: reports/{runId}/summary.md
+    data: reports/{runId}/result.json
+  schema: verify-expenses/v1
+
+review:
+  mode: report-first
+
+visibility: board
+
+aliases:
+  - uploaded expenses
+
+scriptContracts:
+  - id: verify-uploaded
+    path: verify-uploaded.ts
+    command:
+      - node
+      - verify-uploaded.ts
+      - --version
+    expectExitCode: 0
+    minVersion: 1.0.0
+
+precheck:
+  command: node verify-uploaded.ts --precheck --profile notion.budget
+  timeoutSeconds: 30
